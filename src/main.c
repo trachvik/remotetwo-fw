@@ -1,27 +1,22 @@
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
+#include "haptic.h"
+#include "drivers/as5048a.h"
 
-/* Alias led0 z devicetree */
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+/* Device instances */
+static struct as5048a_device encoder;
+static bldc_driver_6pwm_t driver;
+static bldc_motor_t motor;
 
-/* Timer callback – volana v preruseni jednou za sekundu */
-static void timer_handler(struct k_timer *timer)
-{
-	gpio_pin_toggle_dt(&led);
-}
-
-K_TIMER_DEFINE(blink_timer, timer_handler, NULL);
+/* Global pointer for sensor wrapper */
+struct as5048a_device *g_as5048a = &encoder;
 
 int main(void)
 {
-	if (!gpio_is_ready_dt(&led)) {
-		return -1;
+	/* Initialize haptic motor */
+	haptic_init(&motor, (bldc_driver_t*)&driver, (sensor_t*)&encoder);
+
+	/* haptic_loop is now driven by a 10 kHz timer thread in haptic.c */
+	while (1) {
+		k_sleep(K_FOREVER);
 	}
-
-	gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
-
-	/* Spustit timer: prvni expirace za 1 s, perioda 1 s */
-	k_timer_start(&blink_timer, K_SECONDS(1), K_SECONDS(1));
-
-	return 0;
 }
