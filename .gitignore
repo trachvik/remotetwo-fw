@@ -1,0 +1,16 @@
+# Ignoruj všechny složky začínající na build
+build*/
+_build/
+
+# Ignoruj konkrétní soubory, které se občas zapomenou v kořenu
+.ninja_deps
+.ninja_log
+build.ninja
+CMakeCache.txt
+CMakeCache.tmp
+cmake_install.cmake
+compile_commands.json
+sysbuild_modules.txt
+zephyr_modules.txt
+zephyr_settings.txt
+build_info.yml*
