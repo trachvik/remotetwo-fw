@@ -41,7 +41,7 @@ extern float sensor_get_angle(sensor_t *sensor);
 
 /* AS5048A encoder from devicetree */
 #define AS5048A_NODE DT_NODELABEL(as5048a)
-static const struct spi_dt_spec as5048a_spi = SPI_DT_SPEC_GET(AS5048A_NODE, SPI_WORD_SET(16) | SPI_TRANSFER_MSB | SPI_MODE_CPHA, 0);
+static const struct spi_dt_spec as5048a_spi = SPI_DT_SPEC_GET(AS5048A_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPHA, 0);
 static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw0), gpios, {0});
 
 /* Haptic state variables */

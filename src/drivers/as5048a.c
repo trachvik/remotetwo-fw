@@ -45,12 +45,12 @@ int as5048a_read_raw(struct as5048a_device *dev, uint16_t *angle)
 		return -EINVAL;
 	}
 
-	/* Single SPI transaction to read angle */
-	uint16_t tx_data = AS5048A_CMD_ANGLE;
-	uint16_t rx_data = 0;
+	/* Single SPI transaction to read angle (AS5048A_CMD_ANGLE = 0xFFFF) */
+	uint8_t tx_data[2] = { 0xFF, 0xFF };
+	uint8_t rx_data[2] = { 0x00, 0x00 };
 
 	const struct spi_buf tx_buf = {
-		.buf = &tx_data,
+		.buf = tx_data,
 		.len = sizeof(tx_data)
 	};
 	const struct spi_buf_set tx_bufs = {
@@ -59,7 +59,7 @@ int as5048a_read_raw(struct as5048a_device *dev, uint16_t *angle)
 	};
 
 	const struct spi_buf rx_buf = {
-		.buf = &rx_data,
+		.buf = rx_data,
 		.len = sizeof(rx_data)
 	};
 	const struct spi_buf_set rx_bufs = {
@@ -73,8 +73,8 @@ int as5048a_read_raw(struct as5048a_device *dev, uint16_t *angle)
 		return ret;
 	}
 
-	/* Extract 14-bit angle data */
-	*angle = rx_data & 0x3FFF;
+	/* Reconstruct 16-bit word (MSB first) and extract 14-bit angle */
+	*angle = (((uint16_t)rx_data[0] << 8) | rx_data[1]) & 0x3FFF;
 
 	return 0;
 }
