@@ -4,8 +4,11 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/logging/log.h>
 #include <math.h>
 #include <arm_math.h>
+
+LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 
 /* Sensor abstraction - implemented in as5048a.c */
 extern void sensor_update(sensor_t *sensor);
@@ -119,16 +122,16 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     struct as5048a_device *as5048a = (struct as5048a_device *)encoder;
 
     /* Initialize AS5048A encoder */
-    printk("1. Initializing AS5048A encoder...\n");
+    LOG_INF("1. Initializing AS5048A encoder...");
     if (as5048a_init(as5048a, &as5048a_spi) < 0)
     {
-        printk("   ERROR: Failed to initialize AS5048A: %d\n", -1);
+        LOG_ERR("   Failed to initialize AS5048A");
         return -1;
     }
-    printk("   [OK] AS5048A ready\n\n");
+    LOG_INF("   [OK] AS5048A ready");
 
     /* Initialize BLDC 6PWM Driver */
-    printk("2. Initializing 6PWM driver...\n");
+    LOG_INF("2. Initializing 6PWM driver...");
     bldc_driver_6pwm_init_struct(driver_6pwm,
                                  PWM_AH_PIN, PWM_AL_PIN,
                                  PWM_BH_PIN, PWM_BL_PIN,
@@ -143,13 +146,13 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 
     if (bldc_driver_6pwm_init_hw(driver_6pwm) != DRIVER_INIT_OK)
     {
-        printk("   ERROR: Failed to initialize driver\n");
+        LOG_ERR("   Failed to initialize driver");
         return -1;
     }
-    printk("   [OK] Driver initialized\n\n");
+    LOG_INF("   [OK] Driver initialized");
 
     /* Initialize BLDC Motor */
-    printk("3. Initializing BLDC motor...\n");
+    LOG_INF("3. Initializing BLDC motor...");
     bldc_motor_init_struct(motor,
                            MOTOR_POLE_PAIRS,
                            MOTOR_PHASE_RESISTANCE,
@@ -169,29 +172,29 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 
     if (!bldc_motor_init(motor))
     {
-        printk("   ERROR: Failed to initialize motor\n");
+        LOG_ERR("   Failed to initialize motor");
         return -1;
     }
-    printk("   [OK] Motor initialized\n\n");
+    LOG_INF("   [OK] Motor initialized");
 
     /* Run FOC calibration */
-    printk("4. Running FOC calibration...\n");
-    printk("   This will align sensor and motor phases\n");
-    printk("   Motor will move slightly during calibration\n");
+    LOG_INF("4. Running FOC calibration...");
+    LOG_INF("   This will align sensor and motor phases");
+    LOG_INF("   Motor will move slightly during calibration");
     k_msleep(1000);
 
     if (!bldc_motor_init_foc(motor))
     {
-        printk("   ERROR: FOC calibration failed\n");
-        printk("   Motor status: %d\n", motor->motor_status);
+        LOG_ERR("   FOC calibration failed");
+        LOG_ERR("   Motor status: %d", motor->motor_status);
         return -1;
     }
-    printk("   [OK] FOC calibration complete!\n\n");
+    LOG_INF("   [OK] FOC calibration complete!");
 
-    printk("================================================\n");
-    printk("  System Ready - Motor Status: %d\n", motor->motor_status);
-    printk("  Entering main control loop...\n");
-    printk("================================================\n\n");
+    LOG_INF("================================================");
+    LOG_INF("  System Ready - Motor Status: %d", motor->motor_status);
+    LOG_INF("  Entering main control loop...");
+    LOG_INF("================================================");
 
     /* Set motor to torque control mode (voltage) */
     //motor->controller = TORQUE;
@@ -216,7 +219,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     step_count_buffer = 0;
     num_steps_old = NUM_STEPS;
 
-    printk("Starting motor control in 2 seconds...\n");
+    LOG_INF("Starting motor control in 2 seconds...");
     k_msleep(2000);
 
     /* Start 10 kHz (100 µs) FOC control loop */
@@ -265,12 +268,14 @@ void haptic_loop(bldc_motor_t *motor)
     int step_count_abs = (num_steps > 0) ? ((float)num_steps / _2PI) * angle_rel : 0;
     float between_steps_pos = angle_rel - step_count_abs * step_size + step_size / 2;
     
-    /* Debug print */
-    /*if (now - last_print > 500) {
-        printk("Angle: %.1f°, Vel: %.2f rad/s\n", 
-               angle_rel * 180.0f / 3.14159f, motor->shaft_velocity);
+    /* Debug print every 500 ms */
+    static int64_t last_print = 0;
+    int64_t now = k_uptime_get();
+    if (now - last_print > 500) {
+        LOG_DBG("Angle: %.1f deg, Vel: %.2f rad/s",
+               (double)(angle_rel * 180.0f / 3.14159f), (double)motor->shaft_velocity);
         last_print = now;
-    }*/
+    }
     
     /* Smooth mode */
     if (num_steps == 0) {
