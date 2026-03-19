@@ -6,6 +6,8 @@ project(remote_two)
 target_sources(app PRIVATE
     src/main.c
     src/haptic.c
+    src/remote_control.c
+    src/BLE_commands.c
     src/drivers/as5048a.c
     src/drivers/bldc_driver_6pwm.c
     src/drivers/bldc_motor.c

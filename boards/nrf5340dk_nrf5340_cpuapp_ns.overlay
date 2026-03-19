@@ -102,3 +102,19 @@ pwm_low: &pwm1 {
 	pinctrl-1 = <&pwm1_sleep>;
 	pinctrl-names = "default", "sleep";
 };
+
+/* Button 2 (SW1) - menu confirm/select button (P0.24 on nRF5340 DK) */
+/ {
+	aliases {
+		sw1 = &button1;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		button1: button_1 {
+			gpios = <&gpio0 24 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Menu button";
+			zephyr,code = <INPUT_KEY_ENTER>;
+		};
+	};
+};

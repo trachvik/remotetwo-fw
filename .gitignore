@@ -1,8 +1,8 @@
-# Ignoruj všechny složky začínající na build
+# ignore build directories
 build*/
 _build/
 
-# Ignoruj konkrétní soubory, které se občas zapomenou v kořenu
+# Ignore CMake build files
 .ninja_deps
 .ninja_log
 build.ninja
