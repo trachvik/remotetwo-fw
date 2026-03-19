@@ -18,9 +18,8 @@ extern float sensor_get_angle(sensor_t *sensor);
 extern void sensor_update(sensor_t *sensor);
 extern float sensor_get_angle(sensor_t *sensor);
 
-#define NUM_STEPS 0
 #define SUPPLY_VOLTAGE 5.0f
-//#define HAPTIC_OUTPUT_GAIN 2.0f
+#define HAPTIC_OUTPUT_GAIN 2.0f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
 
 /* PWM pin definitions for 6PWM BLDC driver */
@@ -47,7 +46,7 @@ static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw0)
 /* Haptic state variables */
 static float start_angle = 0.0f;
 static int step_count_buffer = 0;
-static int num_steps_old = NUM_STEPS;
+static int num_steps_old = 16;
 static float last_voltage = 0.0f;
 static int step_count = 0;
 
@@ -57,7 +56,7 @@ static K_SEM_DEFINE(haptic_sem, 0, 1);
 static struct k_timer haptic_timer;
 
 #define HAPTIC_THREAD_STACK_SIZE 2048
-#define HAPTIC_THREAD_PRIORITY   0       /* Highest preemptible priority */
+#define HAPTIC_THREAD_PRIORITY   0
 static K_THREAD_STACK_DEFINE(haptic_stack, HAPTIC_THREAD_STACK_SIZE);
 static struct k_thread haptic_thread_data;
 
@@ -80,7 +79,7 @@ int haptic_update_num_steps_from_button(void)
 {
     static bool initialized = false;
     static bool last_pressed = false;
-    static int current_num_steps = NUM_STEPS;
+    static int current_num_steps = 0;
     static int64_t last_change_ms = 0;
 
     if (!initialized) {
@@ -101,14 +100,16 @@ int haptic_update_num_steps_from_button(void)
     int64_t now_ms = k_uptime_get();
 
     if (pressed && !last_pressed && (now_ms - last_change_ms) > 180) {
+        /* Cycle: 0 -> 16 -> 12 -> 8 -> 0 -> 16 ... */
         if (current_num_steps == 0) {
-            current_num_steps = 20;
+            current_num_steps = 16;
         } else if (current_num_steps <= 8) {
             current_num_steps = 0;
         } else {
             current_num_steps -= 4;
         }
         last_change_ms = now_ms;
+        LOG_INF("Steps: %d", current_num_steps);
     }
 
     last_pressed = pressed;
@@ -126,7 +127,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     if (as5048a_init(as5048a, &as5048a_spi) < 0)
     {
         LOG_ERR("   Failed to initialize AS5048A");
-        return -1;
+        //return -1;
     }
     LOG_INF("   [OK] AS5048A ready");
 
@@ -147,7 +148,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     if (bldc_driver_6pwm_init_hw(driver_6pwm) != DRIVER_INIT_OK)
     {
         LOG_ERR("   Failed to initialize driver");
-        return -1;
+        //return -1;
     }
     LOG_INF("   [OK] Driver initialized");
 
@@ -173,7 +174,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     if (!bldc_motor_init(motor))
     {
         LOG_ERR("   Failed to initialize motor");
-        return -1;
+        //return -1;
     }
     LOG_INF("   [OK] Motor initialized");
 
@@ -187,7 +188,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     {
         LOG_ERR("   FOC calibration failed");
         LOG_ERR("   Motor status: %d", motor->motor_status);
-        return -1;
+        //return -1;
     }
     LOG_INF("   [OK] FOC calibration complete!");
 
@@ -213,22 +214,37 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     uint16_t startup_raw = 0;
     if (as5048a_read_raw(as5048a, &startup_raw) == 0) {
         start_angle = ((float)startup_raw / 16384.0f) * _2PI;
+        LOG_INF("Encoder startup_raw = %u, angle = %.2f deg",
+                startup_raw, (double)(start_angle * 180.0f / 3.14159f));
     } else {
+        LOG_ERR("Failed to read encoder startup angle!");
         start_angle = 0.0f;
     }
+
+    /* Encoder diagnostic: read 5 samples */
+    LOG_INF("Encoder diagnostic (5 samples):");
+    for (int i = 0; i < 5; i++) {
+        uint16_t raw = 0;
+        int ret = as5048a_read_raw(as5048a, &raw);
+        LOG_INF("  [%d] ret=%d raw=%u angle=%.2f deg",
+                i, ret, raw, (double)(((float)raw / 16384.0f) * 360.0f));
+        k_msleep(100);
+    }
+
     step_count_buffer = 0;
-    num_steps_old = NUM_STEPS;
+    num_steps_old = 16;
 
     LOG_INF("Starting motor control in 2 seconds...");
     k_msleep(2000);
 
     /* Start 10 kHz (100 µs) FOC control loop */
     g_motor_ptr = motor;
+    /* DEBUG: timer/thread disabled, haptic_loop called from main */
     k_timer_init(&haptic_timer, haptic_timer_cb, NULL);
     k_thread_create(&haptic_thread_data, haptic_stack,
-                    K_THREAD_STACK_SIZEOF(haptic_stack),
-                    haptic_thread_fn, NULL, NULL, NULL,
-                    HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
+                   K_THREAD_STACK_SIZEOF(haptic_stack),
+                   haptic_thread_fn, NULL, NULL, NULL,
+                   HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&haptic_thread_data, "haptic_foc");
     k_timer_start(&haptic_timer, K_USEC(100), K_USEC(100));
 
@@ -241,7 +257,7 @@ void haptic_loop(bldc_motor_t *motor)
     float voltage_filter_alpha = 0.8f;
 
     int num_steps = haptic_update_num_steps_from_button();
-    
+    // int num_steps = 8; 
     /* Read encoder via sensor abstraction linked in motor struct */
     sensor_update(motor->sensor);
     float current_angle = sensor_get_angle(motor->sensor);
@@ -268,18 +284,17 @@ void haptic_loop(bldc_motor_t *motor)
     int step_count_abs = (num_steps > 0) ? ((float)num_steps / _2PI) * angle_rel : 0;
     float between_steps_pos = angle_rel - step_count_abs * step_size + step_size / 2;
     
-    /* Debug print every 500 ms */
-    static int64_t last_print = 0;
-    int64_t now = k_uptime_get();
-    if (now - last_print > 500) {
-        LOG_DBG("Angle: %.1f deg, Vel: %.2f rad/s",
-               (double)(angle_rel * 180.0f / 3.14159f), (double)motor->shaft_velocity);
+    /* Debug print */
+    /*if (now - last_print > 500) {
+        printk("Angle: %.1f°, Vel: %.2f rad/s\n", 
+               angle_rel * 180.0f / 3.14159f, motor->shaft_velocity);
         last_print = now;
-    }
+    }*/
     
     /* Smooth mode */
     if (num_steps == 0) {
-        /*float damping = 0.5f;
+        bldc_motor_loop_foc(motor);
+        float damping = 0.5f;
         target_voltage = -damping * motor->shaft_velocity;
         
         float abs_vel = (motor->shaft_velocity < 0) ? -motor->shaft_velocity : motor->shaft_velocity;
@@ -290,12 +305,12 @@ void haptic_loop(bldc_motor_t *motor)
             target_voltage *= scale;
         }
         
-        target_voltage = 0.08f * target_voltage + 0.92f * last_voltage;*/
+        target_voltage = 0.08f * target_voltage + 0.92f * last_voltage;
         // passive braking: short all three phases to low side
-        bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
-                                         PHASE_LO, PHASE_LO, PHASE_LO);
-        bldc_driver_6pwm_set_pwm((bldc_driver_6pwm_t *)motor->driver, 0.0f, 0.0f, 0.0f);
-        last_voltage = 0.0f;
+        // bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
+        //                                  PHASE_LO, PHASE_LO, PHASE_LO);
+        // bldc_driver_6pwm_set_pwm((bldc_driver_6pwm_t *)motor->driver, 0.0f, 0.0f, 0.0f);
+        // last_voltage = 0.0f;
 
     }
     /* Detent mode */
@@ -317,15 +332,15 @@ void haptic_loop(bldc_motor_t *motor)
         
         float scaling_factor = 0.3f; // for smoother detents and less noise
         target_voltage = voltage_filter_alpha * target_voltage + (1.0f - voltage_filter_alpha) * last_voltage * scaling_factor;
-    
+    }
     
     last_voltage = target_voltage;
-
-   // float commanded_voltage = target_voltage * HAPTIC_OUTPUT_GAIN;
+    
+    //float commanded_voltage = target_voltage * HAPTIC_OUTPUT_GAIN;
     //if (commanded_voltage > motor->voltage_limit) commanded_voltage = motor->voltage_limit;
     //if (commanded_voltage < -motor->voltage_limit) commanded_voltage = -motor->voltage_limit;
     
     /* SEND VOLTAGE AFTER loopFOC */
-    bldc_motor_move(motor, target_voltage);
-    }
+    bldc_motor_move(motor, target_voltage*2.0f); // apply gain to increase effect strength, can be adjusted or removed as needed
+    
 }
