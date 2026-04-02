@@ -58,6 +58,7 @@ static int num_steps_old = 0;
 static int prev_detent_index = 0;
 static bool detent_prev_init = false;
 static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since start [rad] */
+static void (*g_step_cb)(int dir) = NULL;
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
 static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] — used by detent */
 static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] — used by smooth mode */
@@ -80,6 +81,10 @@ static void haptic_timer_cb(struct k_timer *timer)
     k_sem_give(&haptic_sem);
 }
 
+void haptic_set_step_callback(void (*cb)(int dir))
+{
+    g_step_cb = cb;
+}
 static void haptic_thread_fn(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
@@ -343,6 +348,9 @@ void haptic_loop(bldc_motor_t *motor)
             int steps = (delta > 0) ? delta : -delta;
             for (int i = 0; i < steps; i++) {
                 LOG_INF("detent_step dir=%d", dir);
+                if (g_step_cb) {
+                    g_step_cb(dir);
+                }
             }
             prev_detent_index = current_detent_index;
         }

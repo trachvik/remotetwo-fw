@@ -1,6 +1,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
- #include "haptic.h"
+  #include "haptic.h"
+  #include "remote_control.h"
  #include "drivers/as5048a.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
@@ -19,9 +20,9 @@ int main(void)
 
 	/* Initialize haptic motor */
 	 haptic_init(&motor, (bldc_driver_t*)&driver, (sensor_t*)&encoder);
+	 remote_control_init();
 
 	while (1) {
-		//haptic_loop(&motor);
 		k_msleep(1);
 	}
 }
