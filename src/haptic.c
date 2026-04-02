@@ -14,13 +14,20 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 extern void sensor_update(sensor_t *sensor);
 extern float sensor_get_angle(sensor_t *sensor);
 
-/* Sensor abstraction - implemented in as5048a.c */
-extern void sensor_update(sensor_t *sensor);
-extern float sensor_get_angle(sensor_t *sensor);
-
 #define SUPPLY_VOLTAGE 5.0f
 #define HAPTIC_OUTPUT_GAIN 2.0f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
+
+/* Voltage-control haptic tuning (loop rate: 1 kHz = K_MSEC(1))
+ * SMOOTH_KV   ≈ (KD / Kt) × R_phase  =  (0.0025 / 0.0778) × 5.6  ≈ 0.18 V·s/rad
+ * Velocity LPF α = 0.1 at 1 kHz → ~16 Hz bandwidth (same as reference)
+ * Setpoint IIR α = 0.8/0.7 at 1 kHz → ~127/111 Hz (snappy, matches reference) */
+#define SMOOTH_KV           0.18f   /* V·s/rad — velocity damping, smooth mode */
+#define HAPTIC_DETENT_AMP_V 1.5f    /* V — peak spring voltage in detent mode */
+#define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
+#define VEL_LPF_ALPHA       0.1f    /* velocity IIR α at 1 kHz → 16 Hz BW */
+#define SMOOTH_IIR_ALPHA    0.8f    /* setpoint IIR α at 1 kHz → 127 Hz BW */
+#define DETENT_IIR_ALPHA    0.7f    /* setpoint IIR α at 1 kHz → 111 Hz BW */
 
 /* PWM pin definitions for 6PWM BLDC driver */
 /* TODO: Update these pin numbers based on your actual hardware */
@@ -46,17 +53,20 @@ static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw0)
 /* Haptic state variables */
 static float start_angle = 0.0f;
 static int step_count_buffer = 0;
-static int num_steps_old = 16;
-static float last_voltage = 0.0f;
+static int num_steps_old = 0;
 static int step_count = 0;
+static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
+static float haptic_inst_vel   =  0.0f;   /* filtered velocity [rad/s] */
+static float smooth_v_filt = 0.0f;        /* IIR on voltage setpoint, smooth mode */
+static float detent_v_filt = 0.0f;        /* IIR on voltage setpoint, detent mode */
 
 /* FOC control loop thread - triggered by k_timer at 10 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
 static K_SEM_DEFINE(haptic_sem, 0, 1);
 static struct k_timer haptic_timer;
 
-#define HAPTIC_THREAD_STACK_SIZE 2048
-#define HAPTIC_THREAD_PRIORITY   0
+#define HAPTIC_THREAD_STACK_SIZE 4096
+#define HAPTIC_THREAD_PRIORITY   0  /* Highest preemptible — safe at 1 kHz */
 static K_THREAD_STACK_DEFINE(haptic_stack, HAPTIC_THREAD_STACK_SIZE);
 static struct k_thread haptic_thread_data;
 
@@ -232,7 +242,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     }
 
     step_count_buffer = 0;
-    num_steps_old = 16;
+    num_steps_old = 0;
 
     LOG_INF("Starting motor control in 2 seconds...");
     k_msleep(2000);
@@ -246,101 +256,90 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
                    haptic_thread_fn, NULL, NULL, NULL,
                    HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&haptic_thread_data, "haptic_foc");
-    k_timer_start(&haptic_timer, K_USEC(100), K_USEC(100));
+    k_timer_start(&haptic_timer, K_MSEC(1), K_MSEC(1));  /* 1 kHz — matches reference */
 
     return 0;
 }
 
 void haptic_loop(bldc_motor_t *motor)
 {
-    float target_voltage;
-    float voltage_filter_alpha = 0.8f;
-
     int num_steps = haptic_update_num_steps_from_button();
-    // int num_steps = 8; 
-    /* Read encoder via sensor abstraction linked in motor struct */
+
     sensor_update(motor->sensor);
     float current_angle = sensor_get_angle(motor->sensor);
-    
+
+    /* Instantaneous velocity: differentiate encoder angle, LPF α=0.1 at 1 kHz.
+     * α=0.1 at 1 kHz → ~16 Hz bandwidth (matches reference project exactly).
+     * At 1 kHz a 1-LSB encoder spike is 0.38 rad/s vs 3.8 rad/s at 10 kHz. */
+    if (haptic_prev_angle < 0.0f) haptic_prev_angle = current_angle;
+    float d_ang = current_angle - haptic_prev_angle;
+    while (d_ang >  _2PI * 0.5f) d_ang -= _2PI;
+    while (d_ang < -_2PI * 0.5f) d_ang += _2PI;
+    haptic_prev_angle = current_angle;
+    haptic_inst_vel = VEL_LPF_ALPHA * (d_ang * 1000.0f) + (1.0f - VEL_LPF_ALPHA) * haptic_inst_vel;
+
     /* Calculate relative angle */
     float angle_rel = current_angle - start_angle;
 
-    // Preserve position when num_steps is changed
+    /* Log initial mode at very first call */
+    static bool first_call = true;
+    if (first_call) {
+        first_call = false;
+        LOG_INF("mode=%s num_steps=%d (initial)",
+                (num_steps == 0) ? "smooth" : "detent", num_steps);
+    }
+
+    /* Preserve position when num_steps changes; reset IIR filters on transition */
     if (num_steps != num_steps_old) {
         step_count_buffer = step_count;
         start_angle = current_angle;
         num_steps_old = num_steps;
         angle_rel = 0.0f;
+        smooth_v_filt = 0.0f;
+        detent_v_filt = 0.0f;
+        LOG_INF("mode=%s num_steps=%d",
+                (num_steps == 0) ? "smooth" : "detent", num_steps);
     }
-    
+
     /* Normalize angle to [0, 2π] */
     while (angle_rel > _2PI) angle_rel -= _2PI;
-    while (angle_rel < 0) angle_rel += _2PI;
-    
-    /* Calculate step position */
-    float step_size = (num_steps > 0) ? (_2PI / (float)num_steps) : _2PI;
-    float step_count_f = (num_steps > 0) ? ((float)num_steps / _2PI) * angle_rel : 0.0f;
-    step_count = (int)roundf(step_count_f) + step_count_buffer;
-    int step_count_abs = (num_steps > 0) ? ((float)num_steps / _2PI) * angle_rel : 0;
-    float between_steps_pos = angle_rel - step_count_abs * step_size + step_size / 2;
-    
-    /* Debug print */
-    /*if (now - last_print > 500) {
-        printk("Angle: %.1f°, Vel: %.2f rad/s\n", 
-               angle_rel * 180.0f / 3.14159f, motor->shaft_velocity);
-        last_print = now;
-    }*/
-    
-    /* Smooth mode */
-    if (num_steps == 0) {
-        bldc_motor_loop_foc(motor);
-        float damping = 0.5f;
-        target_voltage = -damping * motor->shaft_velocity;
-        
-        float abs_vel = (motor->shaft_velocity < 0) ? -motor->shaft_velocity : motor->shaft_velocity;
-        if (abs_vel < 0.1f) {
-            target_voltage = 0.0f;
-        } else if (abs_vel < 3.0f) {
-            float scale = (abs_vel - 0.1f) / 2.9f;
-            target_voltage *= scale;
-        }
-        
-        target_voltage = 0.08f * target_voltage + 0.92f * last_voltage;
-        // passive braking: short all three phases to low side
-        // bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
-        //                                  PHASE_LO, PHASE_LO, PHASE_LO);
-        // bldc_driver_6pwm_set_pwm((bldc_driver_6pwm_t *)motor->driver, 0.0f, 0.0f, 0.0f);
-        // last_voltage = 0.0f;
+    while (angle_rel < 0.0f) angle_rel += _2PI;
 
+    bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
+                                     PHASE_ON, PHASE_ON, PHASE_ON);
+
+    float target_voltage;
+
+    if (num_steps == 0) {
+        /* ---- Smooth mode: velocity damping ---- */
+        float v_sp = -SMOOTH_KV * haptic_inst_vel;
+        if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
+        if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
+
+        smooth_v_filt = SMOOTH_IIR_ALPHA * v_sp + (1.0f - SMOOTH_IIR_ALPHA) * smooth_v_filt;
+        target_voltage = smooth_v_filt;
+    } else {
+        /* ---- Detent mode: sinusoidal spring + velocity damping ---- */
+        float step_size  = _2PI / (float)num_steps;
+        float normalized = angle_rel / step_size;
+        float nearest_f  = roundf(normalized);
+        step_count       = (int)nearest_f + step_count_buffer;
+
+        /* Error from nearest detent centre ∈ (-0.5, 0.5).
+         * Spring restores toward zero: -A·sin(2π·err) pulls back. */
+        float norm_err = normalized - nearest_f;
+
+        float v_sp = -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err)
+                     - DETENT_KV * haptic_inst_vel;
+        if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
+        if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
+
+        detent_v_filt = DETENT_IIR_ALPHA * v_sp + (1.0f - DETENT_IIR_ALPHA) * detent_v_filt;
+        target_voltage = detent_v_filt;
     }
-    /* Detent mode */
-    else {
-        bldc_motor_loop_foc(motor);
-        bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
-                                         PHASE_ON, PHASE_ON, PHASE_ON);
-        float norm_pos = between_steps_pos / step_size;
-        target_voltage = -motor->voltage_limit * 0.2f * sinf(_2PI * norm_pos); // does not work well with arm_sin_f32 for some reason, maybe due to precision issues, so using math.h sinf instead
-        
-        float dist = (norm_pos - 0.5f < 0) ? -(norm_pos - 0.5f) : (norm_pos - 0.5f);
-        
-        if (dist < 0.05f) {
-            target_voltage = 0.0f;
-        } else if (dist < 0.15f) {
-            float scale = (dist - 0.05f) / 0.1f;
-            target_voltage *= scale;
-        }
-        
-        float scaling_factor = 0.3f; // for smoother detents and less noise
-        target_voltage = voltage_filter_alpha * target_voltage + (1.0f - voltage_filter_alpha) * last_voltage * scaling_factor;
-    }
-    
-    last_voltage = target_voltage;
-    
-    //float commanded_voltage = target_voltage * HAPTIC_OUTPUT_GAIN;
-    //if (commanded_voltage > motor->voltage_limit) commanded_voltage = motor->voltage_limit;
-    //if (commanded_voltage < -motor->voltage_limit) commanded_voltage = -motor->voltage_limit;
-    
-    /* SEND VOLTAGE AFTER loopFOC */
-    bldc_motor_move(motor, target_voltage*2.0f); // apply gain to increase effect strength, can be adjusted or removed as needed
-    
+
+    /* move() sets target, loop_foc() applies it using fresh electrical angle.
+     * Order MUST be: move → loop_foc  (SimpleFOC contract). */
+    bldc_motor_move(motor, target_voltage);
+    bldc_motor_loop_foc(motor);
 }
