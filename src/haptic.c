@@ -22,14 +22,13 @@ extern float sensor_get_angle(sensor_t *sensor);
  * Velocity LPF α = 0.1  at 1 kHz → ~16 Hz BW  (detent — fast response)
  * Velocity LPF α = 0.01 at 1 kHz → ~1.6 Hz BW (smooth — prevents zero-crossing between encoder ticks)
  * At 0.5 rad/s the encoder fires every ~77 ms; α=0.01 keeps vel estimate from decaying to 0 between ticks. */
-#define SMOOTH_KV           0.8f    /* V·s/rad — velocity damping, smooth mode */
-#define SMOOTH_VEL_ALPHA    0.05f   /* vel IIR α for smooth mode → τ=20 ms, fast onset */
-#define SMOOTH_MIN_V        0.4f    /* minimum braking voltage to overcome cogging */
+#define SMOOTH_KV           0.3f    /* V·s/rad — velocity damping, smooth mode */
+#define SMOOTH_VEL_ALPHA    0.03f   /* vel IIR α for smooth mode → τ=33 ms, more tick averaging */
 #define SMOOTH_VEL_THRESH   0.05f   /* rad/s — below this: freewheel (no force) */
-#define HAPTIC_DETENT_AMP_V 1.75f   /* V — halved from 2.5 V */
+#define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
 #define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
 #define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode → 16 Hz BW */
-#define SMOOTH_IIR_ALPHA    0.8f    /* setpoint IIR at 1 kHz */
+#define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz → τ=10 ms; smears encoder LSB steps */
 #define DETENT_IIR_ALPHA    0.85f   /* slight filtering to reduce encoder noise */
 
 /* PWM pin definitions for 6PWM BLDC driver */
@@ -319,14 +318,15 @@ void haptic_loop(bldc_motor_t *motor)
     float target_voltage;
 
     if (num_steps == 0) {
-        /* ---- Smooth mode: viscous damping with anti-cogging floor ---- */
+        /* ---- Smooth mode: viscous damping with soft-start ramp ----
+         * Linear ramp from 0 to full KV damping over [THRESH, 2*THRESH].
+         * Avoids hard force jump that causes oscillation. */
         float v_sp = 0.0f;
         float abs_vel = (smooth_vel < 0.0f) ? -smooth_vel : smooth_vel;
         if (abs_vel > SMOOTH_VEL_THRESH) {
-            v_sp = -SMOOTH_KV * smooth_vel;
-            /* Enforce minimum braking voltage so cogging doesn't mask damping */
-            if (v_sp > 0.0f && v_sp < SMOOTH_MIN_V)  v_sp = SMOOTH_MIN_V;
-            if (v_sp < 0.0f && v_sp > -SMOOTH_MIN_V) v_sp = -SMOOTH_MIN_V;
+            float scale = (abs_vel - SMOOTH_VEL_THRESH) / SMOOTH_VEL_THRESH;
+            if (scale > 1.0f) scale = 1.0f;
+            v_sp = -SMOOTH_KV * smooth_vel * scale;
         }
         if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
         if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
