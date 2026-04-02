@@ -19,15 +19,18 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
 
 /* Voltage-control haptic tuning (loop rate: 1 kHz = K_MSEC(1))
- * SMOOTH_KV   ≈ (KD / Kt) × R_phase  =  (0.0025 / 0.0778) × 5.6  ≈ 0.18 V·s/rad
- * Velocity LPF α = 0.1 at 1 kHz → ~16 Hz bandwidth (same as reference)
- * Setpoint IIR α = 0.8/0.7 at 1 kHz → ~127/111 Hz (snappy, matches reference) */
-#define SMOOTH_KV           0.18f   /* V·s/rad — velocity damping, smooth mode */
-#define HAPTIC_DETENT_AMP_V 1.5f    /* V — peak spring voltage in detent mode */
+ * Velocity LPF α = 0.1  at 1 kHz → ~16 Hz BW  (detent — fast response)
+ * Velocity LPF α = 0.01 at 1 kHz → ~1.6 Hz BW (smooth — prevents zero-crossing between encoder ticks)
+ * At 0.5 rad/s the encoder fires every ~77 ms; α=0.01 keeps vel estimate from decaying to 0 between ticks. */
+#define SMOOTH_KV           0.8f    /* V·s/rad — velocity damping, smooth mode */
+#define SMOOTH_VEL_ALPHA    0.05f   /* vel IIR α for smooth mode → τ=20 ms, fast onset */
+#define SMOOTH_MIN_V        0.4f    /* minimum braking voltage to overcome cogging */
+#define SMOOTH_VEL_THRESH   0.05f   /* rad/s — below this: freewheel (no force) */
+#define HAPTIC_DETENT_AMP_V 1.75f   /* V — halved from 2.5 V */
 #define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
-#define VEL_LPF_ALPHA       0.1f    /* velocity IIR α at 1 kHz → 16 Hz BW */
-#define SMOOTH_IIR_ALPHA    0.8f    /* setpoint IIR α at 1 kHz → 127 Hz BW */
-#define DETENT_IIR_ALPHA    0.7f    /* setpoint IIR α at 1 kHz → 111 Hz BW */
+#define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode → 16 Hz BW */
+#define SMOOTH_IIR_ALPHA    0.8f    /* setpoint IIR at 1 kHz */
+#define DETENT_IIR_ALPHA    0.85f   /* slight filtering to reduce encoder noise */
 
 /* PWM pin definitions for 6PWM BLDC driver */
 /* TODO: Update these pin numbers based on your actual hardware */
@@ -56,7 +59,8 @@ static int step_count_buffer = 0;
 static int num_steps_old = 0;
 static int step_count = 0;
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
-static float haptic_inst_vel   =  0.0f;   /* filtered velocity [rad/s] */
+static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] — used by detent */
+static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] — used by smooth mode */
 static float smooth_v_filt = 0.0f;        /* IIR on voltage setpoint, smooth mode */
 static float detent_v_filt = 0.0f;        /* IIR on voltage setpoint, detent mode */
 
@@ -276,7 +280,10 @@ void haptic_loop(bldc_motor_t *motor)
     while (d_ang >  _2PI * 0.5f) d_ang -= _2PI;
     while (d_ang < -_2PI * 0.5f) d_ang += _2PI;
     haptic_prev_angle = current_angle;
+    /* Fast estimate for detent mode (16 Hz BW) */
     haptic_inst_vel = VEL_LPF_ALPHA * (d_ang * 1000.0f) + (1.0f - VEL_LPF_ALPHA) * haptic_inst_vel;
+    /* Slow estimate for smooth mode (~1.6 Hz BW) — stays non-zero between encoder ticks */
+    smooth_vel = SMOOTH_VEL_ALPHA * (d_ang * 1000.0f) + (1.0f - SMOOTH_VEL_ALPHA) * smooth_vel;
 
     /* Calculate relative angle */
     float angle_rel = current_angle - start_angle;
@@ -297,6 +304,7 @@ void haptic_loop(bldc_motor_t *motor)
         angle_rel = 0.0f;
         smooth_v_filt = 0.0f;
         detent_v_filt = 0.0f;
+        smooth_vel    = 0.0f;
         LOG_INF("mode=%s num_steps=%d",
                 (num_steps == 0) ? "smooth" : "detent", num_steps);
     }
@@ -311,8 +319,15 @@ void haptic_loop(bldc_motor_t *motor)
     float target_voltage;
 
     if (num_steps == 0) {
-        /* ---- Smooth mode: velocity damping ---- */
-        float v_sp = -SMOOTH_KV * haptic_inst_vel;
+        /* ---- Smooth mode: viscous damping with anti-cogging floor ---- */
+        float v_sp = 0.0f;
+        float abs_vel = (smooth_vel < 0.0f) ? -smooth_vel : smooth_vel;
+        if (abs_vel > SMOOTH_VEL_THRESH) {
+            v_sp = -SMOOTH_KV * smooth_vel;
+            /* Enforce minimum braking voltage so cogging doesn't mask damping */
+            if (v_sp > 0.0f && v_sp < SMOOTH_MIN_V)  v_sp = SMOOTH_MIN_V;
+            if (v_sp < 0.0f && v_sp > -SMOOTH_MIN_V) v_sp = -SMOOTH_MIN_V;
+        }
         if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
         if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
 
