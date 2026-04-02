@@ -28,6 +28,11 @@ static void on_knob_step(int dir)
 
 void remote_control_init(void)
 {
+    int err = ble_commands_init();
+    if (err != 0) {
+        LOG_ERR("BLE init failed (%d)", err);
+    }
+
     current_param = PARAM_POSITION;
     haptic_set_step_callback(on_knob_step);
     LOG_INF("Remote control init, param=%d", current_param);

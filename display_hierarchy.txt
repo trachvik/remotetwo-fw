@@ -1,0 +1,10 @@
+- status menu
+- position
+    - X
+    - Y
+    - Z
+    - E
+- temperature
+    - extruder
+    - bed
+-

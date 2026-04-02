@@ -22,5 +22,6 @@ typedef struct {
 } menu_state_t;
 
 void remote_control_init(void);
+void remote_control_process(void);
 
 #endif /* REMOTE_CONTROL_H */

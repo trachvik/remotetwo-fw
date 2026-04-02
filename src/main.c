@@ -18,9 +18,11 @@ int main(void)
 {
 	LOG_INF("System started");
 
+	/* Initialize BLE early so nRF Connect can discover the device immediately. */
+	remote_control_init();
+
 	/* Initialize haptic motor */
 	 haptic_init(&motor, (bldc_driver_t*)&driver, (sensor_t*)&encoder);
-	 remote_control_init();
 
 	while (1) {
 		k_msleep(1);
