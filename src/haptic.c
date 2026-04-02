@@ -54,9 +54,10 @@ static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw0)
 
 /* Haptic state variables */
 static float start_angle = 0.0f;
-static int step_count_buffer = 0;
 static int num_steps_old = 0;
-static int step_count = 0;
+static int prev_detent_index = 0;
+static bool detent_prev_init = false;
+static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since start [rad] */
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
 static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] — used by detent */
 static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] — used by smooth mode */
@@ -244,7 +245,6 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
         k_msleep(100);
     }
 
-    step_count_buffer = 0;
     num_steps_old = 0;
 
     LOG_INF("Starting motor control in 2 seconds...");
@@ -283,9 +283,7 @@ void haptic_loop(bldc_motor_t *motor)
     haptic_inst_vel = VEL_LPF_ALPHA * (d_ang * 1000.0f) + (1.0f - VEL_LPF_ALPHA) * haptic_inst_vel;
     /* Slow estimate for smooth mode (~1.6 Hz BW) — stays non-zero between encoder ticks */
     smooth_vel = SMOOTH_VEL_ALPHA * (d_ang * 1000.0f) + (1.0f - SMOOTH_VEL_ALPHA) * smooth_vel;
-
-    /* Calculate relative angle */
-    float angle_rel = current_angle - start_angle;
+    cumulative_angle += d_ang;
 
     /* Log initial mode at very first call */
     static bool first_call = true;
@@ -297,20 +295,14 @@ void haptic_loop(bldc_motor_t *motor)
 
     /* Preserve position when num_steps changes; reset IIR filters on transition */
     if (num_steps != num_steps_old) {
-        step_count_buffer = step_count;
-        start_angle = current_angle;
         num_steps_old = num_steps;
-        angle_rel = 0.0f;
         smooth_v_filt = 0.0f;
         detent_v_filt = 0.0f;
         smooth_vel    = 0.0f;
+        detent_prev_init = false;
         LOG_INF("mode=%s num_steps=%d",
                 (num_steps == 0) ? "smooth" : "detent", num_steps);
     }
-
-    /* Normalize angle to [0, 2π] */
-    while (angle_rel > _2PI) angle_rel -= _2PI;
-    while (angle_rel < 0.0f) angle_rel += _2PI;
 
     bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
                                      PHASE_ON, PHASE_ON, PHASE_ON);
@@ -336,9 +328,24 @@ void haptic_loop(bldc_motor_t *motor)
     } else {
         /* ---- Detent mode: sinusoidal spring + velocity damping ---- */
         float step_size  = _2PI / (float)num_steps;
-        float normalized = angle_rel / step_size;
+        float normalized = cumulative_angle / step_size;
         float nearest_f  = roundf(normalized);
-        step_count       = (int)nearest_f + step_count_buffer;
+        int current_detent_index = (int)nearest_f;
+
+        /* Incremental encoder-style output: emit +1/-1 per crossed detent. */
+        if (!detent_prev_init) {
+            prev_detent_index = current_detent_index;
+            detent_prev_init = true;
+        }
+        int delta = current_detent_index - prev_detent_index;
+        if (delta != 0) {
+            int dir = (delta > 0) ? 1 : -1;
+            int steps = (delta > 0) ? delta : -delta;
+            for (int i = 0; i < steps; i++) {
+                LOG_INF("detent_step dir=%d", dir);
+            }
+            prev_detent_index = current_detent_index;
+        }
 
         /* Error from nearest detent centre ∈ (-0.5, 0.5).
          * Spring restores toward zero: -A·sin(2π·err) pulls back. */
