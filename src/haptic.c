@@ -135,7 +135,6 @@ int haptic_update_num_steps_from_button(void)
     return current_num_steps;
 }
 
-
 int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 {
     bldc_driver_6pwm_t *driver_6pwm = (bldc_driver_6pwm_t *)driver;
@@ -347,7 +346,6 @@ void haptic_loop(bldc_motor_t *motor)
             int dir = (delta > 0) ? 1 : -1;
             int steps = (delta > 0) ? delta : -delta;
             for (int i = 0; i < steps; i++) {
-                LOG_INF("detent_step dir=%d", dir);
                 if (g_step_cb) {
                     g_step_cb(dir);
                 }

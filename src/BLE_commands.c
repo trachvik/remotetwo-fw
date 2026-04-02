@@ -14,7 +14,7 @@ LOG_MODULE_REGISTER(ble_commands, LOG_LEVEL_DBG);
 
 /* Keep BLE sending out of the haptic loop: enqueue short text payloads and
  * transmit from a dedicated thread. */
-#define BLE_MSG_MAX_LEN       8
+#define BLE_MSG_MAX_LEN      20
 #define BLE_TX_QUEUE_LEN      16
 #define BLE_TX_STACK_SIZE   1024
 #define BLE_TX_THREAD_PRIO    7
@@ -201,17 +201,10 @@ static void ble_queue_text(const char *text)
     }
 }
 
-void ble_send_gcode(remote_param_t param)
+void ble_send_gcode(const char *cmd)
 {
-    switch (param) {
-    case PARAM_POSITION:
-        ble_queue_text("GC:P");
-        break;
-    case PARAM_TEMPERATURE:
-        ble_queue_text("GC:T");
-        break;
-    default:
-        ble_queue_text("GC:I");
-        break;
+    if (cmd == NULL) {
+        return;
     }
+    ble_queue_text(cmd);
 }

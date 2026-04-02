@@ -1,10 +1,11 @@
 - status menu
 - position
+    - back
     - X
     - Y
     - Z
     - E
 - temperature
+    - back
     - extruder
     - bed
--
