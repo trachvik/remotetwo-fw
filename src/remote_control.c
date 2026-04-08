@@ -241,6 +241,13 @@ static void send_text_gcode(const char *code)
     LOG_INF("GCODE tx: %s", code);
 }
 
+static void send_position_delta(char axis, float delta)
+{
+    char cmd[20];
+    (void)snprintf(cmd, sizeof(cmd), "mv:%c:%.1f", axis, (double)delta);
+    send_text_gcode(cmd);
+}
+
 static void enter_edit_mode(edit_target_t target)
 {
     const param_desc_t *desc = find_param_desc(target);
@@ -288,23 +295,30 @@ static void confirm_edit_and_send(void)
         g_edit_target = EDIT_NONE;
         return;
     }
-    char cmd[20];
-    char val_str[12];
-
     float tx_value = g_edit_value;
     if (is_position_target(g_edit_target)) {
         tx_value = g_edit_value - g_edit_base_value;
     }
 
-    (void)snprintf(val_str, sizeof(val_str), desc->fmt, (double)tx_value);
-    (void)snprintf(cmd, sizeof(cmd), "%s:%s", desc->token, val_str);
+    if (is_position_target(g_edit_target)) {
+        /* Position is applied on each knob step; confirm only exits edit mode. */
+        g_ui_mode = UI_MODE_NAV;
+        g_edit_target = EDIT_NONE;
+        log_menu_state("exit edit");
+        return;
+    }
 
     if ((strncmp(desc->token, "mv:", 3) == 0 || strcmp(desc->token, "offset") == 0) && !ble_printer_can_move()) {
         LOG_WRN("Move blocked: printer reports can_move=0");
         return;
     }
 
+    char cmd[20];
+    char val_str[12];
+    (void)snprintf(val_str, sizeof(val_str), desc->fmt, (double)tx_value);
+    (void)snprintf(cmd, sizeof(cmd), "%s:%s", desc->token, val_str);
     send_text_gcode(cmd);
+
     g_ui_mode = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     log_menu_state("exit edit");
@@ -339,10 +353,26 @@ static void on_knob_step(int dir)
         if (desc == NULL) {
             return;
         }
+        float prev_value = g_edit_value;
         float step = current_edit_step(desc);
         g_edit_value = clampf(g_edit_value + ((float)dir * step),
                               desc->value_min, desc->value_max);
         g_edit_value = roundf(g_edit_value * 100.0f) / 100.0f;
+
+        if (is_position_target(g_edit_target)) {
+            if (!ble_printer_can_move()) {
+                LOG_WRN("Move blocked: printer reports can_move=0");
+                g_edit_value = prev_value;
+                return;
+            }
+
+            float delta = g_edit_value - prev_value;
+            if (fabsf(delta) >= 0.0001f) {
+                send_position_delta(desc->token[3], delta);
+                g_edit_base_value += delta;
+            }
+        }
+
         LOG_INF("Edit dir=%d step=%.3f val=%.2f", dir, (double)step, (double)g_edit_value);
         log_menu_state("edit");
         return;

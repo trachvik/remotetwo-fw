@@ -123,4 +123,5 @@ state:temp:e:201.5:b:59.0
 - If no `state:*` telemetry has been received yet (e.g., mobile-only testing), movement is allowed by default.
 - After Raspberry Pi telemetry is implemented and stable, keep movement blocking enabled and driven by `state:can_move` for safe operation.
 - In axis edit mode, the shown value starts from last known absolute position, but transmitted `mv:*` is still relative delta.
+- In position edit mode (`X/Y/Z/E`), each knob step sends `mv:*` immediately; confirm button only exits edit mode.
 - Definitions for custom keys and sheets remain managed on Raspberry Pi (Flask side).
