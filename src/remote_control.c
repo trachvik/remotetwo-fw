@@ -3,6 +3,7 @@
 #include "haptic.h"
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -58,6 +59,7 @@ static sheet_item_t      g_sheet_sel  = SHEET_BACK;
 static ui_mode_t         g_ui_mode    = UI_MODE_NAV;
 static edit_target_t     g_edit_target = EDIT_NONE;
 static float             g_edit_value  = 0.0f;
+static float             g_edit_base_value = 0.0f;
 static int64_t           g_last_edit_step_ms = 0;
 static int64_t           g_btn2_press_ms     = 0;
 static bool              g_light_on = false;
@@ -95,6 +97,11 @@ static const param_desc_t *find_param_desc(edit_target_t target)
         }
     }
     return NULL;
+}
+
+static bool is_position_target(edit_target_t target)
+{
+    return (target == EDIT_POS_X || target == EDIT_POS_Y || target == EDIT_POS_Z || target == EDIT_POS_E);
 }
 
 static float current_edit_step(const param_desc_t *desc)
@@ -240,9 +247,35 @@ static void enter_edit_mode(edit_target_t target)
     if (desc == NULL) {
         return;
     }
+
+    g_edit_base_value = desc->value_default;
+    g_edit_value = desc->value_default;
+
+    if (is_position_target(target)) {
+        struct ble_printer_state st;
+        if (ble_printer_state_get(&st)) {
+            switch (target) {
+            case EDIT_POS_X:
+                g_edit_base_value = st.pos_x;
+                break;
+            case EDIT_POS_Y:
+                g_edit_base_value = st.pos_y;
+                break;
+            case EDIT_POS_Z:
+                g_edit_base_value = st.pos_z;
+                break;
+            case EDIT_POS_E:
+                g_edit_base_value = st.pos_e;
+                break;
+            default:
+                break;
+            }
+            g_edit_value = g_edit_base_value;
+        }
+    }
+
     g_ui_mode = UI_MODE_EDIT;
     g_edit_target = target;
-    g_edit_value = desc->value_default;
     g_last_edit_step_ms = k_uptime_get();
     log_menu_state("enter edit");
 }
@@ -257,8 +290,20 @@ static void confirm_edit_and_send(void)
     }
     char cmd[20];
     char val_str[12];
-    (void)snprintf(val_str, sizeof(val_str), desc->fmt, (double)g_edit_value);
+
+    float tx_value = g_edit_value;
+    if (is_position_target(g_edit_target)) {
+        tx_value = g_edit_value - g_edit_base_value;
+    }
+
+    (void)snprintf(val_str, sizeof(val_str), desc->fmt, (double)tx_value);
     (void)snprintf(cmd, sizeof(cmd), "%s:%s", desc->token, val_str);
+
+    if ((strncmp(desc->token, "mv:", 3) == 0 || strcmp(desc->token, "offset") == 0) && !ble_printer_can_move()) {
+        LOG_WRN("Move blocked: printer reports can_move=0");
+        return;
+    }
+
     send_text_gcode(cmd);
     g_ui_mode = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
@@ -514,8 +559,9 @@ void remote_control_init(void)
     g_ui_mode     = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     g_light_on    = false;
-    haptic_set_step_callback(on_knob_step);
-    LOG_INF("Remote menu init (btn2=confirm, long=back, btn3=-, btn4=+)");
+    /* Encoder is temporarily out of service; keep menu navigation on buttons only. */
+    haptic_set_step_callback(NULL);
+    LOG_INF("Remote menu init (btn2=confirm, long=back, btn3=-, btn4=+, encoder nav OFF)");
     log_menu_state("init");
 }
 

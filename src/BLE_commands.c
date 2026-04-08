@@ -1,5 +1,7 @@
 #include "BLE_commands.h"
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -12,9 +14,9 @@
 
 LOG_MODULE_REGISTER(ble_commands, LOG_LEVEL_DBG);
 
-/* Keep BLE sending out of the haptic loop: enqueue short text payloads and
+/* Keep BLE sending out of the haptic loop: enqueue text payloads and
  * transmit from a dedicated thread. */
-#define BLE_MSG_MAX_LEN      20
+#define BLE_MSG_MAX_LEN      64
 #define BLE_TX_QUEUE_LEN      16
 #define BLE_TX_STACK_SIZE   1024
 #define BLE_TX_THREAD_PRIO    7
@@ -32,6 +34,234 @@ static struct k_thread ble_tx_thread_data;
 static bool g_ble_connected;
 static struct bt_conn *g_current_conn;
 static bool g_nus_notif_enabled;
+static uint16_t g_tx_cmd_id;
+
+static struct ble_printer_state g_state;
+static struct ble_last_ack g_last_ack;
+static K_MUTEX_DEFINE(g_proto_lock);
+
+static bool str_to_bool(const char *s, bool *out)
+{
+    if (s == NULL || out == NULL) {
+        return false;
+    }
+
+    if ((strcmp(s, "1") == 0) || (strcmp(s, "true") == 0) || (strcmp(s, "on") == 0)) {
+        *out = true;
+        return true;
+    }
+    if ((strcmp(s, "0") == 0) || (strcmp(s, "false") == 0) || (strcmp(s, "off") == 0)) {
+        *out = false;
+        return true;
+    }
+
+    return false;
+}
+
+static bool str_to_float(const char *s, float *out)
+{
+    if (s == NULL || out == NULL) {
+        return false;
+    }
+
+    char *endp = NULL;
+    float val = strtof(s, &endp);
+    if (endp == s || (endp != NULL && *endp != '\0')) {
+        return false;
+    }
+
+    *out = val;
+    return true;
+}
+
+static void parse_ack_message(char *msg)
+{
+    char *saveptr = NULL;
+    char *tok = strtok_r(msg, ":", &saveptr); /* ack */
+    ARG_UNUSED(tok);
+
+    char *id_tok = strtok_r(NULL, ":", &saveptr);
+    char *status_tok = strtok_r(NULL, ":", &saveptr);
+    char *reason_tok = strtok_r(NULL, ":", &saveptr);
+
+    if (id_tok == NULL || status_tok == NULL) {
+        LOG_WRN("Malformed ACK");
+        return;
+    }
+
+    long id_val = strtol(id_tok, NULL, 10);
+    bool ok = (strcmp(status_tok, "ok") == 0);
+
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    g_last_ack.valid = true;
+    g_last_ack.id = (uint16_t)id_val;
+    g_last_ack.ok = ok;
+    if (ok || reason_tok == NULL) {
+        g_last_ack.reason[0] = '\0';
+    } else {
+        (void)snprintf(g_last_ack.reason, sizeof(g_last_ack.reason), "%s", reason_tok);
+    }
+    k_mutex_unlock(&g_proto_lock);
+
+    if (ok) {
+        LOG_INF("ACK id=%ld ok", id_val);
+    } else {
+        LOG_WRN("ACK id=%ld deny=%s", id_val, (reason_tok != NULL) ? reason_tok : "unknown");
+    }
+}
+
+static void parse_state_pos(char *saveptr)
+{
+    float x = g_state.pos_x;
+    float y = g_state.pos_y;
+    float z = g_state.pos_z;
+    float e = g_state.pos_e;
+
+    while (1) {
+        char *axis = strtok_r(NULL, ":", &saveptr);
+        char *val = strtok_r(NULL, ":", &saveptr);
+        if (axis == NULL || val == NULL) {
+            break;
+        }
+
+        float parsed = 0.0f;
+        if (!str_to_float(val, &parsed)) {
+            continue;
+        }
+
+        if (strcmp(axis, "x") == 0) {
+            x = parsed;
+        } else if (strcmp(axis, "y") == 0) {
+            y = parsed;
+        } else if (strcmp(axis, "z") == 0) {
+            z = parsed;
+        } else if (strcmp(axis, "e") == 0) {
+            e = parsed;
+        }
+    }
+
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    g_state.valid = true;
+    g_state.pos_x = x;
+    g_state.pos_y = y;
+    g_state.pos_z = z;
+    g_state.pos_e = e;
+    k_mutex_unlock(&g_proto_lock);
+}
+
+static void parse_state_temp(char *saveptr)
+{
+    float te = g_state.temp_e;
+    float tb = g_state.temp_b;
+
+    while (1) {
+        char *name = strtok_r(NULL, ":", &saveptr);
+        char *val = strtok_r(NULL, ":", &saveptr);
+        if (name == NULL || val == NULL) {
+            break;
+        }
+
+        float parsed = 0.0f;
+        if (!str_to_float(val, &parsed)) {
+            continue;
+        }
+
+        if (strcmp(name, "e") == 0) {
+            te = parsed;
+        } else if (strcmp(name, "b") == 0) {
+            tb = parsed;
+        }
+    }
+
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    g_state.valid = true;
+    g_state.temp_e = te;
+    g_state.temp_b = tb;
+    k_mutex_unlock(&g_proto_lock);
+}
+
+static void parse_state_homed(char *saveptr)
+{
+    bool hx = g_state.homed_x;
+    bool hy = g_state.homed_y;
+    bool hz = g_state.homed_z;
+
+    while (1) {
+        char *axis = strtok_r(NULL, ":", &saveptr);
+        char *val = strtok_r(NULL, ":", &saveptr);
+        if (axis == NULL || val == NULL) {
+            break;
+        }
+
+        bool parsed = false;
+        if (!str_to_bool(val, &parsed)) {
+            continue;
+        }
+
+        if (strcmp(axis, "x") == 0) {
+            hx = parsed;
+        } else if (strcmp(axis, "y") == 0) {
+            hy = parsed;
+        } else if (strcmp(axis, "z") == 0) {
+            hz = parsed;
+        }
+    }
+
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    g_state.valid = true;
+    g_state.homed_x = hx;
+    g_state.homed_y = hy;
+    g_state.homed_z = hz;
+    k_mutex_unlock(&g_proto_lock);
+}
+
+static void parse_state_message(char *msg)
+{
+    char *saveptr = NULL;
+    char *tok = strtok_r(msg, ":", &saveptr); /* state */
+    ARG_UNUSED(tok);
+
+    char *subtype = strtok_r(NULL, ":", &saveptr);
+    if (subtype == NULL) {
+        LOG_WRN("Malformed STATE");
+        return;
+    }
+
+    if (strcmp(subtype, "pos") == 0) {
+        parse_state_pos(saveptr);
+    } else if (strcmp(subtype, "temp") == 0) {
+        parse_state_temp(saveptr);
+    } else if (strcmp(subtype, "homed") == 0) {
+        parse_state_homed(saveptr);
+    } else if (strcmp(subtype, "can_move") == 0) {
+        char *val = strtok_r(NULL, ":", &saveptr);
+        bool parsed = false;
+        if (str_to_bool(val, &parsed)) {
+            k_mutex_lock(&g_proto_lock, K_FOREVER);
+            g_state.valid = true;
+            g_state.can_move = parsed;
+            k_mutex_unlock(&g_proto_lock);
+        }
+    } else if (strcmp(subtype, "printing") == 0) {
+        char *val = strtok_r(NULL, ":", &saveptr);
+        bool parsed = false;
+        if (str_to_bool(val, &parsed)) {
+            k_mutex_lock(&g_proto_lock, K_FOREVER);
+            g_state.valid = true;
+            g_state.printing = parsed;
+            k_mutex_unlock(&g_proto_lock);
+        }
+    } else if (strcmp(subtype, "tool") == 0) {
+        char *val = strtok_r(NULL, ":", &saveptr);
+        if (val != NULL) {
+            long tool = strtol(val, NULL, 10);
+            k_mutex_lock(&g_proto_lock, K_FOREVER);
+            g_state.valid = true;
+            g_state.tool = (int)tool;
+            k_mutex_unlock(&g_proto_lock);
+        }
+    }
+}
 
 static void nus_notif_enabled(bool enabled, void *ctx)
 {
@@ -54,6 +284,15 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
     tmp[copy_len] = '\0';
 
     LOG_INF("NUS RX: %s", tmp);
+
+    if (strncmp(tmp, "ack:", 4) == 0) {
+        parse_ack_message(tmp);
+        return;
+    }
+    if (strncmp(tmp, "state:", 6) == 0 || strncmp(tmp, "status:", 7) == 0) {
+        parse_state_message(tmp);
+        return;
+    }
 }
 
 static struct bt_nus_cb nus_cb = {
@@ -206,5 +445,55 @@ void ble_send_gcode(const char *cmd)
     if (cmd == NULL) {
         return;
     }
-    ble_queue_text(cmd);
+
+    uint16_t id = ++g_tx_cmd_id;
+    if (id == 0U) {
+        id = ++g_tx_cmd_id;
+    }
+
+    char framed[BLE_MSG_MAX_LEN];
+    int ret = snprintf(framed, sizeof(framed), "cmd:%u:%s", id, cmd);
+    if (ret <= 0 || ret >= (int)sizeof(framed)) {
+        LOG_WRN("Command too long, dropping '%s'", cmd);
+        return;
+    }
+
+    ble_queue_text(framed);
+}
+
+bool ble_printer_state_get(struct ble_printer_state *out_state)
+{
+    if (out_state == NULL) {
+        return false;
+    }
+
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    *out_state = g_state;
+    k_mutex_unlock(&g_proto_lock);
+
+    return out_state->valid;
+}
+
+bool ble_printer_can_move(void)
+{
+    bool can_move = true;
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    if (g_state.valid) {
+        can_move = g_state.can_move;
+    }
+    k_mutex_unlock(&g_proto_lock);
+    return can_move;
+}
+
+bool ble_last_ack_get(struct ble_last_ack *out_ack)
+{
+    if (out_ack == NULL) {
+        return false;
+    }
+
+    k_mutex_lock(&g_proto_lock, K_FOREVER);
+    *out_ack = g_last_ack;
+    k_mutex_unlock(&g_proto_lock);
+
+    return out_ack->valid;
 }
