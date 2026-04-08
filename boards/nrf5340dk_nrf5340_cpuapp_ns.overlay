@@ -9,6 +9,12 @@
  *   MISO -> P0.25  (P22 row)
  *   CS   -> P0.26  (P22 row)
  *
+ * OLED display WEO012864GWPP3N00000 (prepared, not active in build):
+ *   SPI  -> SPI4 (SCK P1.15, MOSI P1.13)
+ *   CS   -> P1.12
+ *   DC   -> P1.06
+ *   RST  -> P1.04
+ *
  * 6PWM motor driver:
  *   Phase A high -> P1.05  (Arduino D3)
  *   Phase B high -> P1.07  (Arduino D5)
@@ -87,6 +93,16 @@
 	};
 };
 
+/* SPI4 prepared for future OLED display integration */
+&spi4 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	cs-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spi4_default>;
+	pinctrl-1 = <&spi4_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
 /* PWM0 - high-side phase signals, aliased as pwm_high in application code */
 pwm_high: &pwm0 {
 	status = "okay";
@@ -111,6 +127,28 @@ pwm_low: &pwm1 {
 		sw1 = &button1;
 		sw2 = &button2;
 		sw3 = &button3;
+		disp-dc = &disp_dc;
+		disp-rst = &disp_rst;
+		disp-cs = &disp_cs;
+	};
+
+	display_ctrl {
+		compatible = "gpio-leds";
+
+		disp_dc: disp_dc {
+			gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+			label = "Display DC";
+		};
+
+		disp_rst: disp_rst {
+			gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+			label = "Display RST";
+		};
+
+		disp_cs: disp_cs {
+			gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
+			label = "Display CS";
+		};
 	};
 
 	buttons {

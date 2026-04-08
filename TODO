@@ -1,5 +1,0 @@
-Smooth mode control
-Reverse knob polarity
-Adjustable detend size based on number of steps
-
-Implement 'virtual clicks': when the user moves the knob but doesn't snap to the next step, it counts as 'Enter'. Moving it in the opposite direction counts as 'Back'.
