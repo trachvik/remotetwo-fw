@@ -103,10 +103,14 @@ pwm_low: &pwm1 {
 	pinctrl-names = "default", "sleep";
 };
 
-/* Button 2 (SW1) - menu confirm/select button (P0.24 on nRF5340 DK) */
+/* Button 2 (SW1) - menu confirm/select button (P0.24 on nRF5340 DK)
+ * Button 3 (SW2) - navigate/decrement  — INPUT_KEY_LEFT  (P0.08)
+ * Button 4 (SW3) - navigate/increment  — INPUT_KEY_RIGHT (P0.09) */
 / {
 	aliases {
 		sw1 = &button1;
+		sw2 = &button2;
+		sw3 = &button3;
 	};
 
 	buttons {
@@ -115,6 +119,16 @@ pwm_low: &pwm1 {
 			gpios = <&gpio0 24 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Menu button";
 			zephyr,code = <INPUT_KEY_ENTER>;
+		};
+		button2: button_2 {
+			gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Nav down";
+			zephyr,code = <INPUT_KEY_LEFT>;
+		};
+		button3: button_3 {
+			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Nav up";
+			zephyr,code = <INPUT_KEY_RIGHT>;
 		};
 	};
 };
