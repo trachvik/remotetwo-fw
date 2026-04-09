@@ -4,7 +4,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -52,19 +51,19 @@ static const param_desc_t g_params[] = {
 
 static menu_level_t      g_level      = MENU_LEVEL_ROOT;
 static root_item_t       g_root_sel   = ROOT_STATUS_MENU;
-static position_item_t   g_pos_sel    = POS_BACK;
-static temperature_item_t g_temp_sel  = TEMP_BACK;
-static tool_item_t       g_tool_sel   = TOOL_BACK;
-static macros_item_t     g_macros_sel = MACROS_BACK;
-static sheet_item_t      g_sheet_sel  = SHEET_BACK;
+static position_item_t   g_pos_sel    = POS_X;
+static temperature_item_t g_temp_sel  = TEMP_EXTRUDER;
+static tool_item_t       g_tool_sel   = TOOL_T0;
+static macros_item_t     g_macros_sel = MACROS_SHEET;
+static sheet_item_t      g_sheet_sel  = SHEET_CUSTOM0;
 static ui_mode_t         g_ui_mode    = UI_MODE_NAV;
 static edit_target_t     g_edit_target = EDIT_NONE;
 static float             g_edit_value  = 0.0f;
 static float             g_edit_base_value = 0.0f;
-static int64_t           g_btn2_press_ms     = 0;
 static bool              g_light_on = false;
+static int               g_smooth_nav_accum = 0;
 
-#define BTN2_LONG_PRESS_MS 700
+#define SMOOTH_MENU_STEP_DIV 3
 
 static int wrap_step_int(int value, int count, int dir)
 {
@@ -150,11 +149,10 @@ static const char *root_item_name(root_item_t item)
 static const char *position_item_name(position_item_t item)
 {
     switch (item) {
-    case POS_BACK: return "back";
-    case POS_X:    return "X";
-    case POS_Y:    return "Y";
-    case POS_Z:    return "Z";
-    case POS_E:    return "E";
+    case POS_X: return "X";
+    case POS_Y: return "Y";
+    case POS_Z: return "Z";
+    case POS_E: return "E";
     default:       return "?";
     }
 }
@@ -162,7 +160,6 @@ static const char *position_item_name(position_item_t item)
 static const char *temperature_item_name(temperature_item_t item)
 {
     switch (item) {
-    case TEMP_BACK:     return "back";
     case TEMP_EXTRUDER: return "extruder";
     case TEMP_BED:      return "bed";
     default:            return "?";
@@ -172,16 +169,15 @@ static const char *temperature_item_name(temperature_item_t item)
 static const char *tool_item_name(tool_item_t item)
 {
     switch (item) {
-    case TOOL_BACK: return "back";
-    case TOOL_T0:   return "T0";
-    case TOOL_T1:   return "T1";
-    case TOOL_T2:   return "T2";
-    case TOOL_T3:   return "T3";
-    case TOOL_T4:   return "T4";
-    case TOOL_T5:   return "T5";
-    case TOOL_T6:   return "T6";
-    case TOOL_T7:   return "T7";
-    case TOOL_T8:   return "T8";
+    case TOOL_T0: return "T0";
+    case TOOL_T1: return "T1";
+    case TOOL_T2: return "T2";
+    case TOOL_T3: return "T3";
+    case TOOL_T4: return "T4";
+    case TOOL_T5: return "T5";
+    case TOOL_T6: return "T6";
+    case TOOL_T7: return "T7";
+    case TOOL_T8: return "T8";
     default:        return "?";
     }
 }
@@ -189,7 +185,6 @@ static const char *tool_item_name(tool_item_t item)
 static const char *macros_item_name(macros_item_t item)
 {
     switch (item) {
-    case MACROS_BACK:  return "back";
     case MACROS_SHEET: return "change print sheet";
     case MACROS_LIGHT: return "printer light toggle";
     default:           return "?";
@@ -199,7 +194,6 @@ static const char *macros_item_name(macros_item_t item)
 static const char *sheet_item_name(sheet_item_t item)
 {
     switch (item) {
-    case SHEET_BACK:    return "back";
     case SHEET_CUSTOM0: return "custom0";
     case SHEET_CUSTOM1: return "custom1";
     case SHEET_CUSTOM2: return "custom2";
@@ -377,6 +371,25 @@ static void on_knob_step(int dir)
         return;
     }
 
+    if (haptic_get_num_steps() == 0) {
+        /* In smooth mode, make menu scrolling coarser while keeping edit mode fine. */
+        if ((g_smooth_nav_accum > 0 && dir < 0) || (g_smooth_nav_accum < 0 && dir > 0)) {
+            g_smooth_nav_accum = 0;
+        }
+        g_smooth_nav_accum += dir;
+        if (g_smooth_nav_accum >= SMOOTH_MENU_STEP_DIV) {
+            dir = 1;
+            g_smooth_nav_accum = 0;
+        } else if (g_smooth_nav_accum <= -SMOOTH_MENU_STEP_DIV) {
+            dir = -1;
+            g_smooth_nav_accum = 0;
+        } else {
+            return;
+        }
+    } else {
+        g_smooth_nav_accum = 0;
+    }
+
     switch (g_level) {
     case MENU_LEVEL_ROOT:
         g_root_sel = (root_item_t)wrap_step_int((int)g_root_sel, ROOT_ITEM_COUNT, dir);
@@ -402,7 +415,7 @@ static void on_knob_step(int dir)
     log_menu_state("navigate");
 }
 
-static void on_btn2_confirm(void)
+static void on_confirm_action(void)
 {
     if (g_ui_mode == UI_MODE_EDIT) {
         confirm_edit_and_send();
@@ -416,17 +429,17 @@ static void on_btn2_confirm(void)
             return;
         case ROOT_POSITION:
             g_level = MENU_LEVEL_POSITION;
-            g_pos_sel = POS_BACK;
+            g_pos_sel = POS_X;
             log_menu_state("enter submenu");
             return;
         case ROOT_TEMPERATURE:
             g_level = MENU_LEVEL_TEMPERATURE;
-            g_temp_sel = TEMP_BACK;
+            g_temp_sel = TEMP_EXTRUDER;
             log_menu_state("enter submenu");
             return;
         case ROOT_TOOL:
             g_level = MENU_LEVEL_TOOL;
-            g_tool_sel = TOOL_BACK;
+            g_tool_sel = TOOL_T0;
             log_menu_state("enter submenu");
             return;
         case ROOT_ZOFFSET:
@@ -434,7 +447,7 @@ static void on_btn2_confirm(void)
             return;
         case ROOT_MACROS:
             g_level = MENU_LEVEL_MACROS;
-            g_macros_sel = MACROS_BACK;
+            g_macros_sel = MACROS_SHEET;
             log_menu_state("enter submenu");
             return;
         default:
@@ -444,11 +457,6 @@ static void on_btn2_confirm(void)
 
     if (g_level == MENU_LEVEL_POSITION) {
         switch (g_pos_sel) {
-        case POS_BACK:
-            g_level = MENU_LEVEL_ROOT;
-            g_root_sel = ROOT_POSITION;
-            log_menu_state("back");
-            return;
         case POS_X: enter_edit_mode(EDIT_POS_X); return;
         case POS_Y: enter_edit_mode(EDIT_POS_Y); return;
         case POS_Z: enter_edit_mode(EDIT_POS_Z); return;
@@ -459,11 +467,6 @@ static void on_btn2_confirm(void)
 
     if (g_level == MENU_LEVEL_TEMPERATURE) {
         switch (g_temp_sel) {
-        case TEMP_BACK:
-            g_level = MENU_LEVEL_ROOT;
-            g_root_sel = ROOT_TEMPERATURE;
-            log_menu_state("back");
-            return;
         case TEMP_EXTRUDER: enter_edit_mode(EDIT_TEMP_EXTRUDER); return;
         case TEMP_BED:      enter_edit_mode(EDIT_TEMP_BED);      return;
         default: return;
@@ -471,12 +474,6 @@ static void on_btn2_confirm(void)
     }
 
     if (g_level == MENU_LEVEL_TOOL) {
-        if (g_tool_sel == TOOL_BACK) {
-            g_level = MENU_LEVEL_ROOT;
-            g_root_sel = ROOT_TOOL;
-            log_menu_state("back");
-            return;
-        }
         send_tool(g_tool_sel);
         g_level = MENU_LEVEL_ROOT;
         g_root_sel = ROOT_TOOL;
@@ -486,14 +483,9 @@ static void on_btn2_confirm(void)
 
     if (g_level == MENU_LEVEL_MACROS) {
         switch (g_macros_sel) {
-        case MACROS_BACK:
-            g_level = MENU_LEVEL_ROOT;
-            g_root_sel = ROOT_MACROS;
-            log_menu_state("back");
-            return;
         case MACROS_SHEET:
             g_level = MENU_LEVEL_SHEET;
-            g_sheet_sel = SHEET_BACK;
+            g_sheet_sel = SHEET_CUSTOM0;
             log_menu_state("enter submenu");
             return;
         case MACROS_LIGHT:
@@ -505,12 +497,6 @@ static void on_btn2_confirm(void)
     }
 
     if (g_level == MENU_LEVEL_SHEET) {
-        if (g_sheet_sel == SHEET_BACK) {
-            g_level = MENU_LEVEL_MACROS;
-            g_macros_sel = MACROS_SHEET;
-            log_menu_state("back");
-            return;
-        }
         send_sheet(g_sheet_sel);
         g_level = MENU_LEVEL_MACROS;
         g_macros_sel = MACROS_SHEET;
@@ -565,51 +551,11 @@ static void on_back_action(void)
 static void on_virtual_click(int dir)
 {
     if (dir >= 0) {
-        on_btn2_confirm();
+        on_confirm_action();
         return;
     }
     on_back_action();
 }
-
-static void on_btn2_long_press(void)
-{
-    if (g_ui_mode == UI_MODE_EDIT) {
-        g_ui_mode = UI_MODE_NAV;
-        g_edit_target = EDIT_NONE;
-        log_menu_state("cancel edit");
-        return;
-    }
-
-    if (g_level != MENU_LEVEL_ROOT) {
-        g_level = MENU_LEVEL_ROOT;
-        log_menu_state("back root");
-    }
-}
-
-/* btn2 (SW1) P0.24 = INPUT_KEY_ENTER  → confirm / long-press = back to root
- * Navigation: haptic knob rotation via on_knob_step callback                */
-static void input_cb(struct input_event *evt, void *user_data)
-{
-    ARG_UNUSED(user_data);
-
-    if (evt->code != INPUT_KEY_ENTER) {
-        return;
-    }
-    if (evt->value == 1) {
-        g_btn2_press_ms = k_uptime_get();
-        return;
-    }
-    if (evt->value == 0) {
-        int64_t dt = k_uptime_get() - g_btn2_press_ms;
-        if (dt >= BTN2_LONG_PRESS_MS) {
-            on_btn2_long_press();
-        } else {
-            on_btn2_confirm();
-        }
-    }
-}
-
-INPUT_CALLBACK_DEFINE(NULL, input_cb, NULL);
 
 void remote_control_init(void)
 {
@@ -620,17 +566,17 @@ void remote_control_init(void)
 
     g_level       = MENU_LEVEL_ROOT;
     g_root_sel    = ROOT_STATUS_MENU;
-    g_pos_sel     = POS_BACK;
-    g_temp_sel    = TEMP_BACK;
-    g_tool_sel    = TOOL_BACK;
-    g_macros_sel  = MACROS_BACK;
-    g_sheet_sel   = SHEET_BACK;
+    g_pos_sel     = POS_X;
+    g_temp_sel    = TEMP_EXTRUDER;
+    g_tool_sel    = TOOL_T0;
+    g_macros_sel  = MACROS_SHEET;
+    g_sheet_sel   = SHEET_CUSTOM0;
     g_ui_mode     = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     g_light_on    = false;
     haptic_set_step_callback(on_knob_step);
     haptic_set_virtual_click_callback(on_virtual_click);
-    LOG_INF("Remote menu init (btn2=confirm, long=back, knob=navigate)");
+    LOG_INF("Remote menu init (haptic virtual click=confirm/back, knob=navigate)");
     log_menu_state("init");
 }
 

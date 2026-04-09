@@ -21,7 +21,6 @@ typedef enum {
 } root_item_t;
 
 typedef enum {
-    POS_BACK,
     POS_X,
     POS_Y,
     POS_Z,
@@ -30,14 +29,12 @@ typedef enum {
 } position_item_t;
 
 typedef enum {
-    TEMP_BACK,
     TEMP_EXTRUDER,
     TEMP_BED,
     TEMP_ITEM_COUNT,
 } temperature_item_t;
 
 typedef enum {
-    TOOL_BACK,
     TOOL_T0,
     TOOL_T1,
     TOOL_T2,
@@ -51,14 +48,12 @@ typedef enum {
 } tool_item_t;
 
 typedef enum {
-    MACROS_BACK,
     MACROS_SHEET,
     MACROS_LIGHT,
     MACROS_ITEM_COUNT,
 } macros_item_t;
 
 typedef enum {
-    SHEET_BACK,
     SHEET_CUSTOM0,
     SHEET_CUSTOM1,
     SHEET_CUSTOM2,
