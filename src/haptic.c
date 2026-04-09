@@ -32,8 +32,9 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define SMOOTH_VDETENT_ARM_MS 80
 #define VCLICK_HOLD_MS 1000
 #define VCLICK_LONG_HOLD_MS 2000 /* reserved for future mode-select command */
-#define DETENT_VCLICK_ZONE_MIN 0.10f /* |norm_err| threshold: must be near snap point to arm */
-#define VCLICK_RELEASE_ZONE_MIN 0.07f /* timer reset only close to center to avoid chatter */
+#define GESTURE_ARM_ZONE_MIN   0.16f /* larger dead zone for Enter/Back evaluation */
+#define GESTURE_RELEASE_ZONE   0.10f /* release back near centre to reset gesture */
+#define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f)) /* 0.5 degree on each side */
 #define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
 #define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
 #define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode → 16 Hz BW */
@@ -70,6 +71,7 @@ static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since star
 static void (*g_step_cb)(int dir) = NULL;
 static void (*g_virtual_click_cb)(int dir) = NULL;
 static int g_num_steps_current = 0;        /* current detent count, exposed via getter */
+static int g_num_steps_override = -1;      /* -1 = follow button cycle; >=0 forced */
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
 static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] — used by detent */
 static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] — used by smooth mode */
@@ -105,6 +107,15 @@ static void haptic_timer_cb(struct k_timer *timer)
 int haptic_get_num_steps(void)
 {
     return g_num_steps_current;
+}
+
+void haptic_set_num_steps(int steps)
+{
+    if (steps < 0) {
+        steps = 0;
+    }
+    g_num_steps_override = steps;
+    g_num_steps_current = steps;
 }
 
 void haptic_set_step_callback(void (*cb)(int dir))
@@ -303,6 +314,9 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 void haptic_loop(bldc_motor_t *motor)
 {
     int num_steps = haptic_update_num_steps_from_button();
+    if (g_num_steps_override >= 0) {
+        num_steps = g_num_steps_override;
+    }
     g_num_steps_current = num_steps;
 
     sensor_update(motor->sensor);
@@ -427,25 +441,32 @@ void haptic_loop(bldc_motor_t *motor)
             float norm_err = rel / step_rad;
 
             if (abs_rel < step_rad * 0.5f) {
-                /* Inside spring zone: apply restoring force. */
-                v_sp += -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
+                /* Inside spring zone: apply restoring force with a small force dead zone near sin(0). */
+                if (abs_rel > HAPTIC_ZERO_ZONE_RAD) {
+                    v_sp += -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
+                }
 
-                /* Virtual click: hold in spring zone for 1s → Enter/Back.
-                 * Timer starts when virtual detent arms (knob at rest) — no displacement required.
-                 * Direction at fire time: negative side = Back, center or positive side = Enter. */
-                if (smooth_nudge_start_ms != 0 &&
-                    (now_ms - smooth_nudge_start_ms) >= VCLICK_HOLD_MS) {
-                    int64_t hold_ms = now_ms - smooth_nudge_start_ms;
+                /* Virtual click: only evaluate in outer gesture zone. */
+                {
                     float abs_norm = (norm_err < 0.0f) ? -norm_err : norm_err;
-                    int push_dir = (rel < 0.0f && abs_norm >= VCLICK_RELEASE_ZONE_MIN) ? -1 : 1;
-                    if (g_virtual_click_cb) {
-                        g_virtual_click_cb(push_dir);
+                    int push_dir = (rel < 0.0f) ? -1 : 1;
+
+                    if (abs_norm >= GESTURE_ARM_ZONE_MIN) {
+                        if (smooth_nudge_dir == 0 || smooth_nudge_dir != push_dir) {
+                            smooth_nudge_dir = push_dir;
+                            smooth_nudge_start_ms = now_ms;
+                        } else if ((now_ms - smooth_nudge_start_ms) >= VCLICK_HOLD_MS) {
+                            if (g_virtual_click_cb) {
+                                g_virtual_click_cb(smooth_nudge_dir);
+                            }
+                            smooth_nudge_dir = 0;
+                            smooth_nudge_start_ms = 0;
+                            smooth_vdetent_center = cumulative_angle;
+                        }
+                    } else if (abs_norm <= GESTURE_RELEASE_ZONE) {
+                        smooth_nudge_dir = 0;
+                        smooth_nudge_start_ms = 0;
                     }
-                    smooth_nudge_start_ms = 0;
-                    smooth_nudge_dir = 0;
-                    smooth_vdetent_center = cumulative_angle;
-                    /* Reserved for TODO 2.b */
-                    if (hold_ms >= VCLICK_LONG_HOLD_MS) {}
                 }
             } else {
                 /* Past spring boundary: consume as navigation step and force re-arm at rest.
@@ -492,13 +513,13 @@ void haptic_loop(bldc_motor_t *motor)
         float norm_err = normalized - nearest_f;
 
         /* Virtual click dead zone: arm only when knob is held near the snap point
-         * (|norm_err| >= DETENT_VCLICK_ZONE_MIN ≈ 0.15 * step_width).
+         * (|norm_err| >= GESTURE_ARM_ZONE_MIN).
          * Must exit the zone (return toward centre) before re-arming after a trigger. */
         {
             float abs_norm_err = (norm_err < 0.0f) ? -norm_err : norm_err;
             int snap_dir = (norm_err > 0.0f) ? 1 : -1;
 
-            if (abs_norm_err >= DETENT_VCLICK_ZONE_MIN) {
+            if (abs_norm_err >= GESTURE_ARM_ZONE_MIN) {
                 if (detent_nudge_fired) {
                     /* already triggered once — wait for user to return to centre */
                 } else if (detent_nudge_dir == 0 || snap_dir != detent_nudge_dir) {
@@ -520,8 +541,10 @@ void haptic_loop(bldc_motor_t *motor)
             }
         }
 
-        float v_sp = -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err)
-                     - DETENT_KV * haptic_inst_vel;
+        float v_sp = -DETENT_KV * haptic_inst_vel;
+        if (fabsf(norm_err * step_size) > HAPTIC_ZERO_ZONE_RAD) {
+            v_sp += -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
+        }
         if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
         if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
 
