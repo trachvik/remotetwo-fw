@@ -15,6 +15,19 @@ typedef enum {
 } ui_mode_t;
 
 typedef enum {
+    HAPTIC_MODE_MENU_HIDDEN,
+    HAPTIC_MODE_MENU_VISIBLE,
+} haptic_mode_menu_state_t;
+
+typedef enum {
+    HAPTIC_MODE_SMOOTH,
+    HAPTIC_MODE_DETENT_16,
+    HAPTIC_MODE_DETENT_12,
+    HAPTIC_MODE_DETENT_8,
+    HAPTIC_MODE_ITEM_COUNT,
+} haptic_mode_item_t;
+
+typedef enum {
     EDIT_NONE,
     EDIT_POS_X,
     EDIT_POS_Y,
@@ -62,6 +75,8 @@ static float             g_edit_value  = 0.0f;
 static float             g_edit_base_value = 0.0f;
 static bool              g_light_on = false;
 static int               g_smooth_nav_accum = 0;
+static haptic_mode_menu_state_t g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
+static haptic_mode_item_t       g_haptic_mode_sel  = HAPTIC_MODE_SMOOTH;
 
 #define SMOOTH_MENU_STEP_DIV 3
 
@@ -86,6 +101,38 @@ static float clampf(float value, float min_val, float max_val)
         return max_val;
     }
     return value;
+}
+
+static int haptic_mode_item_to_steps(haptic_mode_item_t item)
+{
+    switch (item) {
+    case HAPTIC_MODE_SMOOTH:    return 0;
+    case HAPTIC_MODE_DETENT_16: return 16;
+    case HAPTIC_MODE_DETENT_12: return 12;
+    case HAPTIC_MODE_DETENT_8:  return 8;
+    default:                    return 0;
+    }
+}
+
+static haptic_mode_item_t haptic_mode_steps_to_item(int steps)
+{
+    switch (steps) {
+    case 16: return HAPTIC_MODE_DETENT_16;
+    case 12: return HAPTIC_MODE_DETENT_12;
+    case 8:  return HAPTIC_MODE_DETENT_8;
+    default: return HAPTIC_MODE_SMOOTH;
+    }
+}
+
+static const char *haptic_mode_item_name(haptic_mode_item_t item)
+{
+    switch (item) {
+    case HAPTIC_MODE_SMOOTH:    return "smooth";
+    case HAPTIC_MODE_DETENT_16: return "step-16";
+    case HAPTIC_MODE_DETENT_12: return "step-12";
+    case HAPTIC_MODE_DETENT_8:  return "step-8";
+    default:                    return "?";
+    }
 }
 
 static const param_desc_t *find_param_desc(edit_target_t target)
@@ -203,6 +250,9 @@ static const char *sheet_item_name(sheet_item_t item)
 
 static const char *current_selection_name(void)
 {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
+        return haptic_mode_item_name(g_haptic_mode_sel);
+    }
     if (g_ui_mode == UI_MODE_EDIT) {
         const param_desc_t *desc = find_param_desc(g_edit_target);
         return (desc != NULL) ? desc->name : "edit";
@@ -341,6 +391,13 @@ static void toggle_light(void)
 
 static void on_knob_step(int dir)
 {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
+        g_haptic_mode_sel = (haptic_mode_item_t)wrap_step_int(
+            (int)g_haptic_mode_sel, HAPTIC_MODE_ITEM_COUNT, dir);
+        log_menu_state("haptic mode navigate");
+        return;
+    }
+
     if (g_ui_mode == UI_MODE_EDIT) {
         const param_desc_t *desc = find_param_desc(g_edit_target);
         if (desc == NULL) {
@@ -417,6 +474,15 @@ static void on_knob_step(int dir)
 
 static void on_confirm_action(void)
 {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
+        int steps = haptic_mode_item_to_steps(g_haptic_mode_sel);
+        haptic_set_num_steps(steps);
+        g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
+        LOG_INF("Haptic mode: %s (steps=%d)", haptic_mode_item_name(g_haptic_mode_sel), steps);
+        log_menu_state("haptic mode confirm");
+        return;
+    }
+
     if (g_ui_mode == UI_MODE_EDIT) {
         confirm_edit_and_send();
         return;
@@ -507,6 +573,12 @@ static void on_confirm_action(void)
 
 static void on_back_action(void)
 {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
+        g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
+        log_menu_state("haptic mode cancel");
+        return;
+    }
+
     if (g_ui_mode == UI_MODE_EDIT) {
         g_ui_mode = UI_MODE_NAV;
         g_edit_target = EDIT_NONE;
@@ -557,6 +629,14 @@ static void on_virtual_click(int dir)
     on_back_action();
 }
 
+static void on_virtual_long_hold(int dir)
+{
+    ARG_UNUSED(dir);
+    g_haptic_mode_menu = HAPTIC_MODE_MENU_VISIBLE;
+    g_haptic_mode_sel  = haptic_mode_steps_to_item(haptic_get_num_steps());
+    log_menu_state("haptic mode menu open (2s hold)");
+}
+
 void remote_control_init(void)
 {
     int err = ble_commands_init();
@@ -574,9 +654,12 @@ void remote_control_init(void)
     g_ui_mode     = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     g_light_on    = false;
+    g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
+    g_haptic_mode_sel  = haptic_mode_steps_to_item(haptic_get_num_steps());
     haptic_set_step_callback(on_knob_step);
     haptic_set_virtual_click_callback(on_virtual_click);
-    LOG_INF("Remote menu init (haptic virtual click=confirm/back, knob=navigate)");
+    haptic_set_virtual_long_hold_callback(on_virtual_long_hold);
+    LOG_INF("Remote menu init (1s=Enter/Back, 2s bump zone=mode menu)");
     log_menu_state("init");
 }
 
