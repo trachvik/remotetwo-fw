@@ -536,22 +536,10 @@ static void on_btn2_long_press(void)
 }
 
 /* btn2 (SW1) P0.24 = INPUT_KEY_ENTER  → confirm / long-press = back to root
- * btn3 (SW2) P0.08 = INPUT_KEY_LEFT   → step -1 (navigate / decrement)
- * btn4 (SW3) P0.09 = INPUT_KEY_RIGHT  → step +1 (navigate / increment)     */
+ * Navigation: haptic knob rotation via on_knob_step callback                */
 static void input_cb(struct input_event *evt, void *user_data)
 {
     ARG_UNUSED(user_data);
-
-    if (evt->value == 1) {
-        if (evt->code == INPUT_KEY_LEFT) {
-            on_knob_step(-1);
-            return;
-        }
-        if (evt->code == INPUT_KEY_RIGHT) {
-            on_knob_step(1);
-            return;
-        }
-    }
 
     if (evt->code != INPUT_KEY_ENTER) {
         return;
@@ -589,9 +577,8 @@ void remote_control_init(void)
     g_ui_mode     = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     g_light_on    = false;
-    /* Encoder is temporarily out of service; keep menu navigation on buttons only. */
-    haptic_set_step_callback(NULL);
-    LOG_INF("Remote menu init (btn2=confirm, long=back, btn3=-, btn4=+, encoder nav OFF)");
+    haptic_set_step_callback(on_knob_step);
+    LOG_INF("Remote menu init (btn2=confirm, long=back, knob=navigate)");
     log_menu_state("init");
 }
 
