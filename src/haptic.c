@@ -30,10 +30,10 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define SMOOTH_VDETENT_STEP_RAD (_2PI / (float)SMOOTH_VDETENT_STEPS)
 #define SMOOTH_VDETENT_ARM_VEL 0.12f
 #define SMOOTH_VDETENT_ARM_MS 80
-#define VCLICK_HOLD_MS 1000
+#define VCLICK_HOLD_MS 500
 #define VCLICK_LONG_HOLD_MS 2000 /* reserved for future mode-select command */
-#define GESTURE_ARM_ZONE_MIN   0.16f /* larger dead zone for Enter/Back evaluation */
-#define GESTURE_RELEASE_ZONE   0.10f /* release back near centre to reset gesture */
+#define GESTURE_ARM_ZONE_MIN   0.14f /* slightly smaller dead zone for Enter/Back evaluation */
+#define GESTURE_RELEASE_ZONE   0.09f /* slightly tighter release zone to reset gesture */
 #define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5° — no PWM output */
 #define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* blend ramps force 0→full between 0.5° and 2.5° */
 #define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
