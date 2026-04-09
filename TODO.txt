@@ -1,6 +1,6 @@
-Smooth mode control
+Smooth mode control - done
 Reverse knob polarity
-Adjustable detend size based on number of steps
+Adjustable detend size based on number of steps - done
 
 
 

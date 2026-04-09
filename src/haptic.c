@@ -25,6 +25,7 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define SMOOTH_KV           0.3f    /* V·s/rad — velocity damping, smooth mode */
 #define SMOOTH_VEL_ALPHA    0.03f   /* vel IIR α for smooth mode → τ=33 ms, more tick averaging */
 #define SMOOTH_VEL_THRESH   0.05f   /* rad/s — below this: freewheel (no force) */
+#define SMOOTH_NAV_STEP_ANGLE_RAD 0.06f /* one UI step per ~3.4 deg in smooth mode */
 #define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
 #define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
 #define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode → 16 Hz BW */
@@ -59,11 +60,13 @@ static int prev_detent_index = 0;
 static bool detent_prev_init = false;
 static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since start [rad] */
 static void (*g_step_cb)(int dir) = NULL;
+static int g_num_steps_current = 0;        /* current detent count, exposed via getter */
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
 static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] — used by detent */
 static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] — used by smooth mode */
 static float smooth_v_filt = 0.0f;        /* IIR on voltage setpoint, smooth mode */
 static float detent_v_filt = 0.0f;        /* IIR on voltage setpoint, detent mode */
+static float smooth_nav_accum = 0.0f;     /* accumulated angle for smooth UI step generation */
 
 /* FOC control loop thread - triggered by k_timer at 10 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
@@ -79,6 +82,11 @@ static void haptic_timer_cb(struct k_timer *timer)
 {
     ARG_UNUSED(timer);
     k_sem_give(&haptic_sem);
+}
+
+int haptic_get_num_steps(void)
+{
+    return g_num_steps_current;
 }
 
 void haptic_set_step_callback(void (*cb)(int dir))
@@ -271,6 +279,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 void haptic_loop(bldc_motor_t *motor)
 {
     int num_steps = haptic_update_num_steps_from_button();
+    g_num_steps_current = num_steps;
 
     sensor_update(motor->sensor);
     float current_angle = sensor_get_angle(motor->sensor);
@@ -303,6 +312,7 @@ void haptic_loop(bldc_motor_t *motor)
         smooth_v_filt = 0.0f;
         detent_v_filt = 0.0f;
         smooth_vel    = 0.0f;
+        smooth_nav_accum = 0.0f;
         detent_prev_init = false;
         LOG_INF("mode=%s num_steps=%d",
                 (num_steps == 0) ? "smooth" : "detent", num_steps);
@@ -314,6 +324,21 @@ void haptic_loop(bldc_motor_t *motor)
     float target_voltage;
 
     if (num_steps == 0) {
+        /* In smooth mode, generate virtual encoder steps from accumulated angle. */
+        smooth_nav_accum += d_ang;
+        while (smooth_nav_accum >= SMOOTH_NAV_STEP_ANGLE_RAD) {
+            if (g_step_cb) {
+                g_step_cb(1);
+            }
+            smooth_nav_accum -= SMOOTH_NAV_STEP_ANGLE_RAD;
+        }
+        while (smooth_nav_accum <= -SMOOTH_NAV_STEP_ANGLE_RAD) {
+            if (g_step_cb) {
+                g_step_cb(-1);
+            }
+            smooth_nav_accum += SMOOTH_NAV_STEP_ANGLE_RAD;
+        }
+
         /* ---- Smooth mode: viscous damping with soft-start ramp ----
          * Linear ramp from 0 to full KV damping over [THRESH, 2*THRESH].
          * Avoids hard force jump that causes oscillation. */

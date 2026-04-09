@@ -34,19 +34,20 @@ typedef struct {
     float value_min;
     float value_max;
     float value_default;
+    float step_smooth;
     float step_fine;
     float step_mid;
     float step_coarse;
 } param_desc_t;
 
 static const param_desc_t g_params[] = {
-    { EDIT_POS_X,         "X",        "mv:x",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f,  0.5f,  1.0f  },
-    { EDIT_POS_Y,         "Y",        "mv:y",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f,  0.5f,  1.0f  },
-    { EDIT_POS_Z,         "Z",        "mv:z",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f,  0.5f,  1.0f  },
-    { EDIT_POS_E,         "E",        "mv:e",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f,  0.5f,  1.0f  },
-    { EDIT_TEMP_EXTRUDER, "extruder", "tp:e",   "%.0f",     0.0f, 300.0f, 200.0f, 0.5f,  1.0f,  5.0f  },
-    { EDIT_TEMP_BED,      "bed",      "tp:b",   "%.0f",     0.0f, 120.0f,  60.0f, 0.5f,  1.0f,  5.0f  },
-    { EDIT_ZOFFSET,       "z-offset", "offset", "%+.2f",   -5.0f,   5.0f,   0.0f, 0.01f, 0.05f, 0.1f  },
+    { EDIT_POS_X,         "X",        "mv:x",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
+    { EDIT_POS_Y,         "Y",        "mv:y",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
+    { EDIT_POS_Z,         "Z",        "mv:z",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
+    { EDIT_POS_E,         "E",        "mv:e",   "%.1f",  -200.0f, 200.0f,   0.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
+    { EDIT_TEMP_EXTRUDER, "extruder", "tp:e",   "%.1f",     0.0f, 300.0f, 200.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
+    { EDIT_TEMP_BED,      "bed",      "tp:b",   "%.1f",     0.0f, 120.0f,  60.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
+    { EDIT_ZOFFSET,       "z-offset", "offset", "%+.2f",   -5.0f,   5.0f,   0.0f, 0.01f, 0.01f, 0.05f, 0.1f  },
 };
 
 static menu_level_t      g_level      = MENU_LEVEL_ROOT;
@@ -60,7 +61,6 @@ static ui_mode_t         g_ui_mode    = UI_MODE_NAV;
 static edit_target_t     g_edit_target = EDIT_NONE;
 static float             g_edit_value  = 0.0f;
 static float             g_edit_base_value = 0.0f;
-static int64_t           g_last_edit_step_ms = 0;
 static int64_t           g_btn2_press_ms     = 0;
 static bool              g_light_on = false;
 
@@ -106,14 +106,14 @@ static bool is_position_target(edit_target_t target)
 
 static float current_edit_step(const param_desc_t *desc)
 {
-    int64_t now_ms = k_uptime_get();
-    int64_t dt_ms  = now_ms - g_last_edit_step_ms;
-    g_last_edit_step_ms = now_ms;
-
-    if (dt_ms <= 120) {
+    int ns = haptic_get_num_steps();
+    if (ns == 0) {
+        return desc->step_smooth;
+    }
+    if (ns <= 8) {
         return desc->step_coarse;
     }
-    if (dt_ms <= 300) {
+    if (ns <= 12) {
         return desc->step_mid;
     }
     return desc->step_fine;
@@ -283,7 +283,6 @@ static void enter_edit_mode(edit_target_t target)
 
     g_ui_mode = UI_MODE_EDIT;
     g_edit_target = target;
-    g_last_edit_step_ms = k_uptime_get();
     log_menu_state("enter edit");
 }
 
