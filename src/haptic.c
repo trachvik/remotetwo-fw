@@ -34,12 +34,14 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define VCLICK_LONG_HOLD_MS 2000 /* reserved for future mode-select command */
 #define GESTURE_ARM_ZONE_MIN   0.16f /* larger dead zone for Enter/Back evaluation */
 #define GESTURE_RELEASE_ZONE   0.10f /* release back near centre to reset gesture */
-#define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f)) /* 0.5 degree on each side */
+#define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5° — no PWM output */
+#define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* blend ramps force 0→full between 0.5° and 2.5° */
 #define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
 #define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
 #define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode → 16 Hz BW */
 #define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz → τ=10 ms; smears encoder LSB steps */
-#define DETENT_IIR_ALPHA    0.85f   /* slight filtering to reduce encoder noise */
+#define DETENT_IIR_ALPHA    0.30f   /* τ≈2.8 ms at 1 kHz — filters encoder-LSB 1 kHz noise
+                                     * while keeping detent snap feel intact */
 
 /* PWM pin definitions for 6PWM BLDC driver */
 /* TODO: Update these pin numbers based on your actual hardware */
@@ -97,6 +99,17 @@ static struct k_timer haptic_timer;
 #define HAPTIC_THREAD_PRIORITY   0  /* Highest preemptible — safe at 1 kHz */
 static K_THREAD_STACK_DEFINE(haptic_stack, HAPTIC_THREAD_STACK_SIZE);
 static struct k_thread haptic_thread_data;
+
+/* Smoothly blend from 0 to 1 between lo and hi (Hermite interpolation).
+ * Eliminates the hard on/off gate at the dead zone boundary that causes
+ * the motor to buzz when encoder noise flips the gate condition every tick. */
+static inline float haptic_blend(float x, float lo, float hi)
+{
+    if (x <= lo) return 0.0f;
+    if (x >= hi) return 1.0f;
+    float t = (x - lo) / (hi - lo);
+    return t * t * (3.0f - 2.0f * t);  /* smoothstep / Hermite */
+}
 
 static void haptic_timer_cb(struct k_timer *timer)
 {
@@ -441,9 +454,13 @@ void haptic_loop(bldc_motor_t *motor)
             float norm_err = rel / step_rad;
 
             if (abs_rel < step_rad * 0.5f) {
-                /* Inside spring zone: apply restoring force with a small force dead zone near sin(0). */
-                if (abs_rel > HAPTIC_ZERO_ZONE_RAD) {
-                    v_sp += -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
+                /* Inside spring zone: apply restoring force with a smooth blend-in region.
+                 * Below HAPTIC_ZERO_ZONE_RAD: force is zero (no PWM jitter at true centre).
+                 * Between HAPTIC_ZERO_ZONE_RAD and HAPTIC_BLEND_ZONE_RAD: force ramps in via
+                 * smoothstep so there is no abrupt voltage step that causes motor buzz. */
+                {
+                    float blend = haptic_blend(abs_rel, HAPTIC_ZERO_ZONE_RAD, HAPTIC_BLEND_ZONE_RAD);
+                    v_sp += -blend * HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
                 }
 
                 /* Virtual click: only evaluate in outer gesture zone. */
@@ -542,8 +559,11 @@ void haptic_loop(bldc_motor_t *motor)
         }
 
         float v_sp = -DETENT_KV * haptic_inst_vel;
-        if (fabsf(norm_err * step_size) > HAPTIC_ZERO_ZONE_RAD) {
-            v_sp += -HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
+        /* Smooth blend-in to avoid oscillation at the dead zone edge. */
+        {
+            float abs_err_rad = fabsf(norm_err * step_size);
+            float blend = haptic_blend(abs_err_rad, HAPTIC_ZERO_ZONE_RAD, HAPTIC_BLEND_ZONE_RAD);
+            v_sp += -blend * HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
         }
         if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
         if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
