@@ -519,6 +519,58 @@ static void on_btn2_confirm(void)
     }
 }
 
+static void on_back_action(void)
+{
+    if (g_ui_mode == UI_MODE_EDIT) {
+        g_ui_mode = UI_MODE_NAV;
+        g_edit_target = EDIT_NONE;
+        log_menu_state("cancel edit");
+        return;
+    }
+
+    switch (g_level) {
+    case MENU_LEVEL_ROOT:
+        log_menu_state("back (root)");
+        return;
+    case MENU_LEVEL_POSITION:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_POSITION;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_TEMPERATURE:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_TEMPERATURE;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_TOOL:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_TOOL;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_MACROS:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_MACROS;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_SHEET:
+        g_level = MENU_LEVEL_MACROS;
+        g_macros_sel = MACROS_SHEET;
+        log_menu_state("back");
+        return;
+    default:
+        return;
+    }
+}
+
+static void on_virtual_click(int dir)
+{
+    if (dir >= 0) {
+        on_btn2_confirm();
+        return;
+    }
+    on_back_action();
+}
+
 static void on_btn2_long_press(void)
 {
     if (g_ui_mode == UI_MODE_EDIT) {
@@ -577,6 +629,7 @@ void remote_control_init(void)
     g_edit_target = EDIT_NONE;
     g_light_on    = false;
     haptic_set_step_callback(on_knob_step);
+    haptic_set_virtual_click_callback(on_virtual_click);
     LOG_INF("Remote menu init (btn2=confirm, long=back, knob=navigate)");
     log_menu_state("init");
 }

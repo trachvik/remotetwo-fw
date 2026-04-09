@@ -11,6 +11,7 @@ void haptic_loop(bldc_motor_t *motor);
 int haptic_update_num_steps_from_button(void);
 int haptic_get_num_steps(void);
 void haptic_set_step_callback(void (*cb)(int dir));
+void haptic_set_virtual_click_callback(void (*cb)(int dir));
 
 
 
