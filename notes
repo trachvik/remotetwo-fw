@@ -2,3 +2,4 @@ RTT serial number: 1050069428
 west flash --runner nrfjprog
 
 
+"Haptic gesture" still does not work, it ignores it completely

@@ -13,6 +13,7 @@ int haptic_get_num_steps(void);
 void haptic_set_num_steps(int steps);
 void haptic_set_step_callback(void (*cb)(int dir));
 void haptic_set_virtual_click_callback(void (*cb)(int dir));
+void haptic_set_mode_menu_gesture_callback(void (*cb)(void));
 
 
 

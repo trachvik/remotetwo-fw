@@ -11,7 +11,7 @@
 
 LOG_MODULE_REGISTER(display_ssd1309, LOG_LEVEL_INF);
 
-#define DISP_SPI_NODE DT_NODELABEL(spi4)
+#define DISP_SPI_NODE DT_NODELABEL(spi3)
 #define DISP_DC_NODE  DT_ALIAS(disp_dc)
 #define DISP_RST_NODE DT_ALIAS(disp_rst)
 #define DISP_CS_NODE  DT_ALIAS(disp_cs)
@@ -32,20 +32,18 @@ static const struct gpio_dt_spec g_dc = GPIO_DT_SPEC_GET(DISP_DC_NODE, gpios);
 static const struct gpio_dt_spec g_rst = GPIO_DT_SPEC_GET(DISP_RST_NODE, gpios);
 static const struct gpio_dt_spec g_cs = GPIO_DT_SPEC_GET(DISP_CS_NODE, gpios);
 
-static struct spi_cs_control g_cs_ctrl = {
-    .gpio = {
-        .port = NULL,
-        .pin = 0,
-        .dt_flags = 0,
-    },
-    .delay = 1,
-};
-
+/*
+ * Zephyr 4.x: spi_config.cs is an embedded struct spi_cs_control, not a pointer.
+ * The gpio field is filled in at runtime inside ssd1309_display_init().
+ */
 static struct spi_config g_spi_cfg = {
     .frequency = 8000000U,
     .operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
-    .slave = 0,
-    .cs = &g_cs_ctrl,
+    .slave     = 0,
+    .cs = {
+        .gpio  = { .port = NULL, .pin = 0, .dt_flags = 0 },
+        .delay = 1U,
+    },
 };
 
 static bool g_display_ready;
@@ -130,7 +128,7 @@ int ssd1309_display_init(void)
         return ret;
     }
 
-    g_cs_ctrl.gpio = g_cs;
+    g_spi_cfg.cs.gpio = g_cs;
 
     (void)gpio_pin_set_dt(&g_rst, 1);
     k_msleep(1);
@@ -146,7 +144,7 @@ int ssd1309_display_init(void)
         0xD3, 0x00,
         0x40,
         0x8D, 0x14,
-        0x20, 0x00,
+        0x20, 0x02,
         0xA1,
         0xC8,
         0xDA, 0x12,
@@ -168,7 +166,7 @@ int ssd1309_display_init(void)
     }
 
     g_display_ready = true;
-    LOG_INF("SSD1306 display init done");
+    LOG_INF("SSD1309 display init done");
 
     return ssd1309_display_clear();
 }

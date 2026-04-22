@@ -34,6 +34,10 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define VCLICK_LONG_HOLD_MS 2000 /* reserved for future mode-select command */
 #define GESTURE_ARM_ZONE_MIN   0.14f /* slightly smaller dead zone for Enter/Back evaluation */
 #define GESTURE_RELEASE_ZONE   0.09f /* slightly tighter release zone to reset gesture */
+#define GESTURE_ARM_VEL_MAX    0.4f  /* rad/s — above this the knob is moving; do not arm click timer */
+#define MODE_MENU_CENTER_ZONE_NORM 0.12f
+#define MODE_MENU_GESTURE_TIMEOUT_MS 550
+#define MODE_MENU_GESTURE_COOLDOWN_MS 700
 #define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5° — no PWM output */
 #define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* blend ramps force 0→full between 0.5° and 2.5° */
 #define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
@@ -72,6 +76,7 @@ static bool detent_prev_init = false;
 static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since start [rad] */
 static void (*g_step_cb)(int dir) = NULL;
 static void (*g_virtual_click_cb)(int dir) = NULL;
+static void (*g_mode_menu_gesture_cb)(void) = NULL;
 static int g_num_steps_current = 0;        /* current detent count, exposed via getter */
 static int g_num_steps_override = -1;      /* -1 = follow button cycle; >=0 forced */
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
@@ -89,6 +94,18 @@ static bool smooth_step_init = false;
 static int detent_nudge_dir = 0;
 static int64_t detent_nudge_start_ms = 0;
 static bool detent_nudge_fired = false;
+
+typedef enum {
+    MODE_GESTURE_IDLE = 0,
+    MODE_GESTURE_WAIT_FIRST_ADJACENT_CENTER,
+    MODE_GESTURE_WAIT_OPPOSITE_ADJACENT_CENTER,
+} mode_menu_gesture_state_t;
+
+static mode_menu_gesture_state_t mode_gesture_state = MODE_GESTURE_IDLE;
+static int mode_gesture_origin_index = 0;
+static int mode_gesture_dir = 0; /* +1 or -1 */
+static int64_t mode_gesture_start_ms = 0;
+static int64_t mode_gesture_last_fire_ms = 0;
 
 /* FOC control loop thread - triggered by k_timer at 10 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
@@ -139,6 +156,11 @@ void haptic_set_step_callback(void (*cb)(int dir))
 void haptic_set_virtual_click_callback(void (*cb)(int dir))
 {
     g_virtual_click_cb = cb;
+}
+
+void haptic_set_mode_menu_gesture_callback(void (*cb)(void))
+{
+    g_mode_menu_gesture_cb = cb;
 }
 
 static void haptic_thread_fn(void *p1, void *p2, void *p3)
@@ -372,6 +394,10 @@ void haptic_loop(bldc_motor_t *motor)
         detent_nudge_dir = 0;
         detent_nudge_start_ms = 0;
         detent_nudge_fired = false;
+        mode_gesture_state = MODE_GESTURE_IDLE;
+        mode_gesture_origin_index = 0;
+        mode_gesture_dir = 0;
+        mode_gesture_start_ms = 0;
         detent_prev_init = false;
         LOG_INF("mode=%s num_steps=%d",
                 (num_steps == 0) ? "smooth" : "detent", num_steps);
@@ -502,6 +528,7 @@ void haptic_loop(bldc_motor_t *motor)
         target_voltage = smooth_v_filt;
     } else {
         /* ---- Detent mode: sinusoidal spring + velocity damping ---- */
+        int64_t now_ms = k_uptime_get();
         float step_size  = _2PI / (float)num_steps;
         float normalized = cumulative_angle / step_size;
         float nearest_f  = roundf(normalized);
@@ -537,7 +564,13 @@ void haptic_loop(bldc_motor_t *motor)
             int snap_dir = (norm_err > 0.0f) ? 1 : -1;
 
             if (abs_norm_err >= GESTURE_ARM_ZONE_MIN) {
-                if (detent_nudge_fired) {
+                float abs_vel_now = (haptic_inst_vel < 0.0f) ? -haptic_inst_vel : haptic_inst_vel;
+                if (abs_vel_now > GESTURE_ARM_VEL_MAX) {
+                    /* Knob still moving — reset arm timer so click only fires when
+                     * the user has genuinely stopped at the edge, not during transit. */
+                    detent_nudge_dir = 0;
+                    detent_nudge_start_ms = 0;
+                } else if (detent_nudge_fired) {
                     /* already triggered once — wait for user to return to centre */
                 } else if (detent_nudge_dir == 0 || snap_dir != detent_nudge_dir) {
                     detent_nudge_dir = snap_dir;
@@ -549,12 +582,88 @@ void haptic_loop(bldc_motor_t *motor)
                     detent_nudge_dir = 0;
                     detent_nudge_start_ms = 0;
                     detent_nudge_fired = true;
-                    /* Reserved: check (now - start) >= VCLICK_LONG_HOLD_MS for TODO 2.b */
                 }
             } else {
                 detent_nudge_dir = 0;
                 detent_nudge_start_ms = 0;
                 detent_nudge_fired = false;
+            }
+        }
+
+        /* Mode menu gesture (detent-only), strict quick pattern:
+         * 1) start in origin center (i)
+         * 2) hit adjacent center (i+1 or i-1)
+         * 3) reverse and hit opposite adjacent center (i-1 or i+1)
+         * Any excursion beyond +/-1 detent from origin cancels gesture.
+         */
+        {
+            float abs_norm_err = (norm_err < 0.0f) ? -norm_err : norm_err;
+            bool near_center = (abs_norm_err <= MODE_MENU_CENTER_ZONE_NORM);
+            bool gesture_timeout = (mode_gesture_start_ms != 0) &&
+                                   ((now_ms - mode_gesture_start_ms) > MODE_MENU_GESTURE_TIMEOUT_MS);
+
+            if (gesture_timeout) {
+                mode_gesture_state = MODE_GESTURE_IDLE;
+                mode_gesture_start_ms = 0;
+                mode_gesture_dir = 0;
+            }
+
+            switch (mode_gesture_state) {
+            case MODE_GESTURE_IDLE:
+                if (near_center) {
+                    mode_gesture_state = MODE_GESTURE_WAIT_FIRST_ADJACENT_CENTER;
+                    mode_gesture_origin_index = current_detent_index;
+                    mode_gesture_start_ms = now_ms;
+                    mode_gesture_dir = 0;
+                }
+                break;
+
+            case MODE_GESTURE_WAIT_FIRST_ADJACENT_CENTER:
+                if (near_center) {
+                    int di = current_detent_index - mode_gesture_origin_index;
+                    if (di == 1 || di == -1) {
+                        mode_gesture_dir = (di > 0) ? 1 : -1;
+                        mode_gesture_state = MODE_GESTURE_WAIT_OPPOSITE_ADJACENT_CENTER;
+                    } else if (di > 1 || di < -1) {
+                        mode_gesture_state = MODE_GESTURE_IDLE;
+                        mode_gesture_start_ms = 0;
+                        mode_gesture_dir = 0;
+                    }
+                }
+                break;
+
+            case MODE_GESTURE_WAIT_OPPOSITE_ADJACENT_CENTER:
+                {
+                    int di = current_detent_index - mode_gesture_origin_index;
+                    if (di > 1 || di < -1) {
+                        /* Long rotation / multi-step overshoot: explicitly reject. */
+                        mode_gesture_state = MODE_GESTURE_IDLE;
+                        mode_gesture_start_ms = 0;
+                        mode_gesture_dir = 0;
+                        break;
+                    }
+
+                    /* Need opposite adjacent center after reversal.
+                     * First leg +1 => final target -1, and vice versa. */
+                    if (near_center && mode_gesture_dir != 0 && di == -mode_gesture_dir) {
+                        if ((now_ms - mode_gesture_last_fire_ms) >= MODE_MENU_GESTURE_COOLDOWN_MS) {
+                            if (g_mode_menu_gesture_cb) {
+                                g_mode_menu_gesture_cb();
+                            }
+                            mode_gesture_last_fire_ms = now_ms;
+                        }
+
+                        mode_gesture_state = MODE_GESTURE_IDLE;
+                        mode_gesture_start_ms = 0;
+                        mode_gesture_dir = 0;
+
+                        /* Prevent accidental immediate click after opening mode menu. */
+                        detent_nudge_dir = 0;
+                        detent_nudge_start_ms = 0;
+                        detent_nudge_fired = true;
+                    }
+                }
+                break;
             }
         }
 

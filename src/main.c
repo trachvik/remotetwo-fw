@@ -2,6 +2,7 @@
 #include <zephyr/logging/log.h>
   #include "haptic.h"
   #include "remote_control.h"
+ #include "ui_display.h"
  #include "drivers/as5048a.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
@@ -24,7 +25,13 @@ int main(void)
 	/* Initialize haptic motor */
 	 haptic_init(&motor, (bldc_driver_t*)&driver, (sensor_t*)&encoder);
 
+	/* Initialize display backend and render startup text using LVGL. */
+	if (ui_display_init() == 0) {
+		(void)ui_display_show_hello_remote();
+	}
+
 	while (1) {
+		ui_display_process();
 		k_msleep(1);
 	}
 }

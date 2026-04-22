@@ -8,6 +8,7 @@ target_sources(app PRIVATE
     src/haptic.c
     src/remote_control.c
     src/BLE_commands.c
+    src/ui_display.c
     src/drivers/as5048a.c
     src/drivers/bldc_driver_6pwm.c
     src/drivers/bldc_motor.c

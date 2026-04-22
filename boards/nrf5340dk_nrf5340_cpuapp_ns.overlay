@@ -9,8 +9,9 @@
  *   MISO -> P0.25  (P22 row)
  *   CS   -> P0.26  (P22 row)
  *
- * OLED display WEO012864GWPP3N00000 (prepared, not active in build):
- *   SPI  -> SPI4 (SCK P1.15, MOSI P1.13)
+ * OLED display SSD1309 (shared SPI3 bus with encoder):
+ *   SCLK -> P0.06  (shared with encoder)
+ *   SDA  -> P0.07  (shared with encoder, SPI MOSI)
  *   CS   -> P1.12
  *   DC   -> P1.06
  *   RST  -> P1.04
@@ -77,30 +78,42 @@
 	};
 };
 
-/* SPI3 - AS5048A encoder */
+/* SPI3 - AS5048A encoder + SSD1309 display (shared bus)
+ * Encoder CS -> P0.26 (reg 0)
+ * Display CS -> P1.12 (reg 1)
+ */
 &spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
-	cs-gpios = <&gpio0 26 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio0 26 GPIO_ACTIVE_LOW>,
+		   <&gpio1 12 GPIO_ACTIVE_LOW>;
 
 	as5048a: as5048a@0 {
 		compatible = "ams,as5048a";
 		reg = <0>;
 		spi-max-frequency = <8000000>;  /* AS5048A max 10 MHz, use 8 MHz */
 	};
-};
 
-/* SPI4 prepared for future OLED display integration */
-&spi4 {
-	compatible = "nordic,nrf-spim";
-	status = "okay";
-	cs-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
-	pinctrl-0 = <&spi4_default>;
-	pinctrl-1 = <&spi4_sleep>;
-	pinctrl-names = "default", "sleep";
+	ssd1309: ssd1309@1 {
+		compatible = "solomon,ssd1306fb";
+		reg = <1>;
+		spi-max-frequency = <8000000>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		com-sequential;
+		prechargep = <0xF1>;
+		reset-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
+		data-cmd-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 /* PWM0 - high-side phase signals, aliased as pwm_high in application code */
@@ -123,32 +136,14 @@ pwm_low: &pwm1 {
  * Button 3 (SW2) - navigate/decrement  — INPUT_KEY_LEFT  (P0.08)
  * Button 4 (SW3) - navigate/increment  — INPUT_KEY_RIGHT (P0.09) */
 / {
+	chosen {
+		zephyr,display = &ssd1309;
+	};
+
 	aliases {
 		sw1 = &button1;
 		sw2 = &button2;
 		sw3 = &button3;
-		disp-dc = &disp_dc;
-		disp-rst = &disp_rst;
-		disp-cs = &disp_cs;
-	};
-
-	display_ctrl {
-		compatible = "gpio-leds";
-
-		disp_dc: disp_dc {
-			gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
-			label = "Display DC";
-		};
-
-		disp_rst: disp_rst {
-			gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
-			label = "Display RST";
-		};
-
-		disp_cs: disp_cs {
-			gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
-			label = "Display CS";
-		};
 	};
 
 	buttons {
