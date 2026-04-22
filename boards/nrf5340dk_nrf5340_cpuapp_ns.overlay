@@ -1,32 +1,15 @@
 /*
- * Device Tree overlay for nRF5340 DK - remote_two
+ * DEBUG overlay — SSD1309 display only, no encoder, no PWM, no buttons.
  *
- * Pin assignments (adjust to match your hardware wiring):
- *
- * AS5048A encoder (SPI3):
- *   SCK  -> P0.06  (Arduino A2 / P21-7)
- *   MOSI -> P0.07  (Arduino A3 / P21-8)
- *   MISO -> P0.25  (P22 row)
- *   CS   -> P0.26  (P22 row)
- *
- * OLED display SSD1309 (shared SPI3 bus with encoder):
- *   SCLK -> P0.06  (shared with encoder)
- *   SDA  -> P0.07  (shared with encoder, SPI MOSI)
- *   CS   -> P1.12
+ * SSD1309 OLED (SPI3, exclusive bus):
+ *   SCLK -> P0.06
+ *   MOSI -> P0.07
+ *   CS   -> P1.12  (reg=0, only device on bus)
  *   DC   -> P1.06
  *   RST  -> P1.04
- *
- * 6PWM motor driver:
- *   Phase A high -> P1.05  (Arduino D3)
- *   Phase B high -> P1.07  (Arduino D5)
- *   Phase C high -> P1.08  (Arduino D6)
- *   Phase A low  -> P1.09  (Arduino D7)
- *   Phase B low  -> P1.10  (Arduino D8)
- *   Phase C low  -> P1.11  (Arduino D9)
  */
 
 &pinctrl {
-	/* SPI3 - AS5048A magnetic encoder */
 	spi3_default: spi3_default {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 6)>,
@@ -42,64 +25,20 @@
 			low-power-enable;
 		};
 	};
-
-	/* PWM0 - high-side gate signals (Phase A/B/C) */
-	pwm0_default: pwm0_default {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 5)>,   /* Phase A high */
-				<NRF_PSEL(PWM_OUT1, 1, 7)>,    /* Phase B high */
-				<NRF_PSEL(PWM_OUT2, 1, 8)>;    /* Phase C high */
-		};
-	};
-	pwm0_sleep: pwm0_sleep {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 5)>,
-				<NRF_PSEL(PWM_OUT1, 1, 7)>,
-				<NRF_PSEL(PWM_OUT2, 1, 8)>;
-			low-power-enable;
-		};
-	};
-
-	/* PWM1 - low-side gate signals (Phase A/B/C) */
-	pwm1_default: pwm1_default {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 9)>,   /* Phase A low */
-				<NRF_PSEL(PWM_OUT1, 1, 10)>,   /* Phase B low */
-				<NRF_PSEL(PWM_OUT2, 1, 11)>;   /* Phase C low */
-		};
-	};
-	pwm1_sleep: pwm1_sleep {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 9)>,
-				<NRF_PSEL(PWM_OUT1, 1, 10)>,
-				<NRF_PSEL(PWM_OUT2, 1, 11)>;
-			low-power-enable;
-		};
-	};
 };
 
-/* SPI3 - AS5048A encoder + SSD1309 display (shared bus)
- * Encoder CS -> P0.26 (reg 0)
- * Display CS -> P1.12 (reg 1)
- */
+/* SPI3 — display is the only device, becomes reg=0 */
 &spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
-	cs-gpios = <&gpio0 26 GPIO_ACTIVE_LOW>,
-		   <&gpio1 12 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
 
-	as5048a: as5048a@0 {
-		compatible = "ams,as5048a";
-		reg = <0>;
-		spi-max-frequency = <8000000>;  /* AS5048A max 10 MHz, use 8 MHz */
-	};
-
-	ssd1309: ssd1309@1 {
+	ssd1309: ssd1309@0 {
 		compatible = "solomon,ssd1306fb";
-		reg = <1>;
+		reg = <0>;
 		spi-max-frequency = <8000000>;
 		width = <128>;
 		height = <64>;
@@ -109,59 +48,14 @@
 		multiplex-ratio = <63>;
 		segment-remap;
 		com-invdir;
-		com-sequential;
 		prechargep = <0xF1>;
 		reset-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
 		data-cmd-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
 	};
 };
 
-/* PWM0 - high-side phase signals, aliased as pwm_high in application code */
-pwm_high: &pwm0 {
-	status = "okay";
-	pinctrl-0 = <&pwm0_default>;
-	pinctrl-1 = <&pwm0_sleep>;
-	pinctrl-names = "default", "sleep";
-};
-
-/* PWM1 - low-side phase signals, aliased as pwm_low in application code */
-pwm_low: &pwm1 {
-	status = "okay";
-	pinctrl-0 = <&pwm1_default>;
-	pinctrl-1 = <&pwm1_sleep>;
-	pinctrl-names = "default", "sleep";
-};
-
-/* Button 2 (SW1) - menu confirm/select button (P0.24 on nRF5340 DK)
- * Button 3 (SW2) - navigate/decrement  — INPUT_KEY_LEFT  (P0.08)
- * Button 4 (SW3) - navigate/increment  — INPUT_KEY_RIGHT (P0.09) */
 / {
 	chosen {
 		zephyr,display = &ssd1309;
-	};
-
-	aliases {
-		sw1 = &button1;
-		sw2 = &button2;
-		sw3 = &button3;
-	};
-
-	buttons {
-		compatible = "gpio-keys";
-		button1: button_1 {
-			gpios = <&gpio0 24 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Menu button";
-			zephyr,code = <INPUT_KEY_ENTER>;
-		};
-		button2: button_2 {
-			gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Nav down";
-			zephyr,code = <INPUT_KEY_LEFT>;
-		};
-		button3: button_3 {
-			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Nav up";
-			zephyr,code = <INPUT_KEY_RIGHT>;
-		};
 	};
 };
