@@ -31,7 +31,6 @@ int main(void)
 	}
 
 	while (1) {
-		ui_display_process();
 		k_msleep(1);
 	}
 }

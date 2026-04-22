@@ -17,3 +17,17 @@
     - Long-hold "nudge": If the user maintains torque without snapping to the next step for an extended period, a mode selection menu activates, allowing the user to select their preferred haptic mode.
 
 To make this work in smooth mode, I must implement a virtual detent that activates at the current position whenever the knob is stationary.
+
+
+## Custom Board
+
+- [ ] make custom board devicetree
+- [ ] swap AS5048 with TMAG5170 - should not be difficuil - Zephyr has TMAG5170 driver
+- [ ] TMC6300 -> DRV8311H
+    - 6pwm -> 3pwm
+    - INL control
+    - SOx analog signals
+    - nSLEEP, nFAULT integration
+- [ ] MAX17260
+    - existing driver MAX17262 - has internal sense rezistor - extarnal has to be defined in devicetree
+    - ALRT
