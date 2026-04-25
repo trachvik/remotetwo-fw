@@ -15,9 +15,9 @@ typedef enum {
 } ui_mode_t;
 
 typedef enum {
-    HAPTIC_MENU_CLOSED,
-    HAPTIC_MENU_BROWSING,
-} haptic_menu_state_t;
+    HAPTIC_MODE_MENU_HIDDEN,
+    HAPTIC_MODE_MENU_VISIBLE,
+} haptic_mode_menu_state_t;
 
 typedef enum {
     HAPTIC_MODE_SMOOTH,
@@ -75,29 +75,12 @@ static float             g_edit_value  = 0.0f;
 static float             g_edit_base_value = 0.0f;
 static bool              g_light_on = false;
 static int               g_smooth_nav_accum = 0;
-static haptic_menu_state_t g_haptic_menu_state = HAPTIC_MENU_CLOSED;
+static haptic_mode_menu_state_t g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
 static haptic_mode_item_t g_haptic_mode_sel = HAPTIC_MODE_SMOOTH;
+static struct k_work_delayable g_click_eval_work;
+static int g_pending_click_dir = 0;
 
-/* Mode-menu gesture detector — fixed-anchor cumulative tracker.
- *
- * Anchor position is fixed at 0 when the window starts (on first step).
- * g_gest_anchor accumulates all subsequent steps within the window.
- * Trigger: anchor touched +1 AND -1 (both sides) without ever exceeding ±1.
- * Long rotation (|anchor| > 1 at any point) poisons the window — no fire even if
- * it later returns to ±1.  Window resets when expired or after firing.
- */
-static bool    g_gest_active      = false;
-static int     g_gest_anchor      = 0;    /* cumulative steps from window start */
-static bool    g_gest_had_pos     = false;
-static bool    g_gest_had_neg     = false;
-static bool    g_gest_poisoned    = false;
-static int64_t g_gest_start_ms    = 0;
-static int64_t g_ignore_click_until_ms = 0;
-
-#define MODE_GESTURE_WINDOW_MS            1200
-#define CLICK_SUPPRESS_AFTER_MODE_OPEN_MS  700
-
-static void log_menu_state(const char *reason);
+#define DOUBLE_CLICK_WINDOW_MS 350
 
 #define SMOOTH_MENU_STEP_DIV 3
 
@@ -154,73 +137,6 @@ static const char *haptic_mode_item_name(haptic_mode_item_t item)
     case HAPTIC_MODE_STEP_8:  return "step-8";
     default:                  return "?";
     }
-}
-
-static void open_haptic_mode_menu_from_gesture(void)
-{
-    if (g_haptic_menu_state == HAPTIC_MENU_BROWSING) {
-        return;
-    }
-    g_haptic_menu_state = HAPTIC_MENU_BROWSING;
-    g_haptic_mode_sel = haptic_mode_steps_to_item(haptic_get_num_steps());
-    g_ignore_click_until_ms = k_uptime_get() + CLICK_SUPPRESS_AFTER_MODE_OPEN_MS;
-    log_menu_state("mode menu open (step gesture)");
-}
-
-static bool handle_mode_step_gesture(int dir)
-{
-    if (haptic_get_num_steps() == 0) {
-        return false;
-    }
-
-    int64_t now_ms = k_uptime_get();
-    int d = (dir >= 0) ? 1 : -1;
-
-    /* Expire old window */
-    if (g_gest_active && (now_ms - g_gest_start_ms) > MODE_GESTURE_WINDOW_MS) {
-        g_gest_active   = false;
-        g_gest_anchor   = 0;
-        g_gest_had_pos  = false;
-        g_gest_had_neg  = false;
-        g_gest_poisoned = false;
-    }
-
-    /* Start fresh window on first step */
-    if (!g_gest_active) {
-        g_gest_active   = true;
-        g_gest_anchor   = d;
-        g_gest_had_pos  = (d > 0);
-        g_gest_had_neg  = (d < 0);
-        g_gest_poisoned = false;
-        g_gest_start_ms = now_ms;
-        LOG_DBG("mgest start anchor=%d", d);
-        return false;
-    }
-
-    g_gest_anchor += d;
-    if (g_gest_anchor > 0) g_gest_had_pos = true;
-    if (g_gest_anchor < 0) g_gest_had_neg = true;
-
-    /* Long rotation: poison this window permanently */
-    if (g_gest_anchor > 1 || g_gest_anchor < -1) {
-        g_gest_poisoned = true;
-    }
-
-    LOG_DBG("mgest anchor=%d had+=%d had-=%d poisoned=%d",
-            g_gest_anchor, (int)g_gest_had_pos, (int)g_gest_had_neg, (int)g_gest_poisoned);
-
-    if (!g_gest_poisoned && g_gest_had_pos && g_gest_had_neg) {
-        g_gest_active   = false;
-        g_gest_anchor   = 0;
-        g_gest_had_pos  = false;
-        g_gest_had_neg  = false;
-        g_gest_poisoned = false;
-        LOG_INF("mgest FIRE");
-        open_haptic_mode_menu_from_gesture();
-        return true;
-    }
-
-    return false;
 }
 
 static const param_desc_t *find_param_desc(edit_target_t target)
@@ -338,7 +254,7 @@ static const char *sheet_item_name(sheet_item_t item)
 
 static const char *current_selection_name(void)
 {
-    if (g_haptic_menu_state == HAPTIC_MENU_BROWSING) {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         return haptic_mode_item_name(g_haptic_mode_sel);
     }
     if (g_ui_mode == UI_MODE_EDIT) {
@@ -479,15 +395,12 @@ static void toggle_light(void)
 
 static void on_knob_step(int dir)
 {
-    if (g_haptic_menu_state == HAPTIC_MENU_BROWSING) {
+    LOG_INF("on_knob_step dir=%d accum=%d ns=%d", dir, g_smooth_nav_accum, haptic_get_num_steps());
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         g_haptic_mode_sel = (haptic_mode_item_t)wrap_step_int(
             (int)g_haptic_mode_sel, HAPTIC_MODE_ITEM_COUNT, dir);
         LOG_INF("Haptic mode select dir=%d", dir);
         log_menu_state("mode navigate");
-        return;
-    }
-
-    if (handle_mode_step_gesture(dir)) {
         return;
     }
 
@@ -567,10 +480,10 @@ static void on_knob_step(int dir)
 
 static void on_confirm_action(void)
 {
-    if (g_haptic_menu_state == HAPTIC_MENU_BROWSING) {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         int steps = haptic_mode_item_to_steps(g_haptic_mode_sel);
         haptic_set_num_steps(steps);
-        g_haptic_menu_state = HAPTIC_MENU_CLOSED;
+        g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
         LOG_INF("Haptic mode applied: %s", haptic_mode_item_name(g_haptic_mode_sel));
         log_menu_state("mode applied");
         return;
@@ -666,8 +579,8 @@ static void on_confirm_action(void)
 
 static void on_back_action(void)
 {
-    if (g_haptic_menu_state == HAPTIC_MENU_BROWSING) {
-        g_haptic_menu_state = HAPTIC_MENU_CLOSED;
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
+        g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
         log_menu_state("mode cancel");
         return;
     }
@@ -715,13 +628,7 @@ static void on_back_action(void)
 
 static void on_virtual_click(int dir)
 {
-    int64_t now_ms = k_uptime_get();
-
-    if (now_ms < g_ignore_click_until_ms) {
-        return;
-    }
-
-    if (g_haptic_menu_state == HAPTIC_MENU_BROWSING) {
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         if (dir >= 0) {
             on_confirm_action();
         } else {
@@ -730,6 +637,34 @@ static void on_virtual_click(int dir)
         return;
     }
 
+    if (g_pending_click_dir != 0 && g_pending_click_dir == dir) {
+        k_work_cancel_delayable(&g_click_eval_work);
+        g_pending_click_dir = 0;
+        g_haptic_mode_menu = HAPTIC_MODE_MENU_VISIBLE;
+        g_haptic_mode_sel = haptic_mode_steps_to_item(haptic_get_num_steps());
+        log_menu_state("mode menu open (double click)");
+        return;
+    }
+
+    if (g_pending_click_dir != 0 && g_pending_click_dir != dir) {
+        k_work_cancel_delayable(&g_click_eval_work);
+        if (g_pending_click_dir >= 0) {
+            on_confirm_action();
+        } else {
+            on_back_action();
+        }
+        g_pending_click_dir = 0;
+    }
+
+    g_pending_click_dir = dir;
+    k_work_reschedule(&g_click_eval_work, K_MSEC(DOUBLE_CLICK_WINDOW_MS));
+}
+
+static void click_eval_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    int dir = g_pending_click_dir;
+    g_pending_click_dir = 0;
     if (dir >= 0) {
         on_confirm_action();
     } else {
@@ -754,19 +689,13 @@ void remote_control_init(void)
     g_ui_mode     = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     g_light_on    = false;
-    g_haptic_menu_state = HAPTIC_MENU_CLOSED;
+    g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
     g_haptic_mode_sel = haptic_mode_steps_to_item(haptic_get_num_steps());
-    g_gest_active           = false;
-    g_gest_anchor           = 0;
-    g_gest_had_pos          = false;
-    g_gest_had_neg          = false;
-    g_gest_poisoned         = false;
-    g_gest_start_ms         = 0;
-    g_ignore_click_until_ms = 0;
+    g_pending_click_dir = 0;
+    k_work_init_delayable(&g_click_eval_work, click_eval_work_handler);
     haptic_set_step_callback(on_knob_step);
     haptic_set_virtual_click_callback(on_virtual_click);
-    haptic_set_mode_menu_gesture_callback(NULL);
-    LOG_INF("Remote menu init (single click=confirm/back, step gesture=mode menu)");
+    LOG_INF("Remote menu init (single click=confirm/back, double click=mode menu)");
     log_menu_state("init");
 }
 

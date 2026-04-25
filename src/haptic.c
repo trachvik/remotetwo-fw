@@ -19,12 +19,12 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
 
 /* Voltage-control haptic tuning (loop rate: 1 kHz = K_MSEC(1))
- * Velocity LPF α = 0.1  at 1 kHz → ~16 Hz BW  (detent — fast response)
- * Velocity LPF α = 0.01 at 1 kHz → ~1.6 Hz BW (smooth — prevents zero-crossing between encoder ticks)
- * At 0.5 rad/s the encoder fires every ~77 ms; α=0.01 keeps vel estimate from decaying to 0 between ticks. */
-#define SMOOTH_KV           0.3f    /* V·s/rad — velocity damping, smooth mode */
-#define SMOOTH_VEL_ALPHA    0.03f   /* vel IIR α for smooth mode → τ=33 ms, more tick averaging */
-#define SMOOTH_VEL_THRESH   0.05f   /* rad/s — below this: freewheel (no force) */
+ * Velocity LPF ╬▒ = 0.1  at 1 kHz Ôćĺ ~16 Hz BW  (detent ÔÇö fast response)
+ * Velocity LPF ╬▒ = 0.01 at 1 kHz Ôćĺ ~1.6 Hz BW (smooth ÔÇö prevents zero-crossing between encoder ticks)
+ * At 0.5 rad/s the encoder fires every ~77 ms; ╬▒=0.01 keeps vel estimate from decaying to 0 between ticks. */
+#define SMOOTH_KV           0.3f    /* V┬Ěs/rad ÔÇö velocity damping, smooth mode */
+#define SMOOTH_VEL_ALPHA    0.03f   /* vel IIR ╬▒ for smooth mode Ôćĺ ¤ä=33 ms, more tick averaging */
+#define SMOOTH_VEL_THRESH   0.05f   /* rad/s ÔÇö below this: freewheel (no force) */
 #define SMOOTH_NAV_STEP_ANGLE_RAD 0.06f /* fine virtual navigation step in smooth mode */
 #define SMOOTH_VDETENT_STEPS 16
 #define SMOOTH_VDETENT_STEP_RAD (_2PI / (float)SMOOTH_VDETENT_STEPS)
@@ -34,17 +34,13 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define VCLICK_LONG_HOLD_MS 2000 /* reserved for future mode-select command */
 #define GESTURE_ARM_ZONE_MIN   0.14f /* slightly smaller dead zone for Enter/Back evaluation */
 #define GESTURE_RELEASE_ZONE   0.09f /* slightly tighter release zone to reset gesture */
-#define GESTURE_ARM_VEL_MAX    0.4f  /* rad/s — above this the knob is moving; do not arm click timer */
-#define MODE_MENU_CENTER_ZONE_NORM 0.12f
-#define MODE_MENU_GESTURE_TIMEOUT_MS 550
-#define MODE_MENU_GESTURE_COOLDOWN_MS 700
-#define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5° — no PWM output */
-#define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* blend ramps force 0→full between 0.5° and 2.5° */
-#define HAPTIC_DETENT_AMP_V 1.6f    /* V — peak spring voltage in detent mode */
-#define DETENT_KV           0.08f   /* V·s/rad — velocity damping, detent mode */
-#define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode → 16 Hz BW */
-#define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz → τ=10 ms; smears encoder LSB steps */
-#define DETENT_IIR_ALPHA    0.30f   /* τ≈2.8 ms at 1 kHz — filters encoder-LSB 1 kHz noise
+#define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5┬░ ÔÇö no PWM output */
+#define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* blend ramps force 0Ôćĺfull between 0.5┬░ and 2.5┬░ */
+#define HAPTIC_DETENT_AMP_V 1.6f    /* V ÔÇö peak spring voltage in detent mode */
+#define DETENT_KV           0.08f   /* V┬Ěs/rad ÔÇö velocity damping, detent mode */
+#define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode Ôćĺ 16 Hz BW */
+#define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz Ôćĺ ¤ä=10 ms; smears encoder LSB steps */
+#define DETENT_IIR_ALPHA    0.30f   /* ¤äÔëł2.8 ms at 1 kHz ÔÇö filters encoder-LSB 1 kHz noise
                                      * while keeping detent snap feel intact */
 
 /* PWM pin definitions for 6PWM BLDC driver */
@@ -76,12 +72,11 @@ static bool detent_prev_init = false;
 static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since start [rad] */
 static void (*g_step_cb)(int dir) = NULL;
 static void (*g_virtual_click_cb)(int dir) = NULL;
-static void (*g_mode_menu_gesture_cb)(void) = NULL;
 static int g_num_steps_current = 0;        /* current detent count, exposed via getter */
 static int g_num_steps_override = -1;      /* -1 = follow button cycle; >=0 forced */
 static float haptic_prev_angle = -1.0f;   /* for inst_vel differentiation */
-static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] — used by detent */
-static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] — used by smooth mode */
+static float haptic_inst_vel   =  0.0f;   /* fast filtered velocity [rad/s] ÔÇö used by detent */
+static float smooth_vel        =  0.0f;   /* slow filtered velocity [rad/s] ÔÇö used by smooth mode */
 static float smooth_v_filt = 0.0f;        /* IIR on voltage setpoint, smooth mode */
 static float detent_v_filt = 0.0f;        /* IIR on voltage setpoint, detent mode */
 static bool smooth_vdetent_armed = false;
@@ -95,25 +90,13 @@ static int detent_nudge_dir = 0;
 static int64_t detent_nudge_start_ms = 0;
 static bool detent_nudge_fired = false;
 
-typedef enum {
-    MODE_GESTURE_IDLE = 0,
-    MODE_GESTURE_WAIT_FIRST_ADJACENT_CENTER,
-    MODE_GESTURE_WAIT_OPPOSITE_ADJACENT_CENTER,
-} mode_menu_gesture_state_t;
-
-static mode_menu_gesture_state_t mode_gesture_state = MODE_GESTURE_IDLE;
-static int mode_gesture_origin_index = 0;
-static int mode_gesture_dir = 0; /* +1 or -1 */
-static int64_t mode_gesture_start_ms = 0;
-static int64_t mode_gesture_last_fire_ms = 0;
-
 /* FOC control loop thread - triggered by k_timer at 10 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
 static K_SEM_DEFINE(haptic_sem, 0, 1);
 static struct k_timer haptic_timer;
 
 #define HAPTIC_THREAD_STACK_SIZE 4096
-#define HAPTIC_THREAD_PRIORITY   0  /* Highest preemptible — safe at 1 kHz */
+#define HAPTIC_THREAD_PRIORITY   0  /* Highest preemptible ÔÇö safe at 1 kHz */
 static K_THREAD_STACK_DEFINE(haptic_stack, HAPTIC_THREAD_STACK_SIZE);
 static struct k_thread haptic_thread_data;
 
@@ -158,14 +141,10 @@ void haptic_set_virtual_click_callback(void (*cb)(int dir))
     g_virtual_click_cb = cb;
 }
 
-void haptic_set_mode_menu_gesture_callback(void (*cb)(void))
-{
-    g_mode_menu_gesture_cb = cb;
-}
-
 static void haptic_thread_fn(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+    LOG_INF(">>> HAPTIC THREAD STARTED <<<");
     while (1) {
         k_sem_take(&haptic_sem, K_FOREVER);
         haptic_loop(g_motor_ptr);
@@ -280,6 +259,25 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     LOG_INF("   Motor will move slightly during calibration");
     k_msleep(1000);
 
+    /* Inline zero-electric-angle measurement: ramp up voltage at 3pi/2,
+     * hold, read encoder. Same call depth as the working settle loop below
+     * (avoids stack overflow that hung inside bldc_motor_init_foc). */
+    motor->sensor_direction = DIR_CW;
+    motor->zero_electric_angle = 0.0f;  /* clear offset before measurement */
+    LOG_INF("   Aligning rotor at 3pi/2...");
+    for (int i = 0; i <= 50; i++) {
+        float v = motor->voltage_sensor_align * (float)i / 50.0f;
+        bldc_motor_set_phase_voltage(motor, v, 0.0f, 4.71239f); /* _3PI_2 */
+        k_msleep(1);
+    }
+    k_msleep(700);  /* let rotor settle */
+    sensor_update(motor->sensor);
+    motor->zero_electric_angle = bldc_motor_electrical_angle(motor);
+    bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
+    k_msleep(100);
+    LOG_INF("   zero_electric_angle = %.4f rad", (double)motor->zero_electric_angle);
+
+    /* bldc_motor_init_foc will now skip both loops (dir=CW, zero_el set) */
     if (!bldc_motor_init_foc(motor))
     {
         LOG_ERR("   FOC calibration failed");
@@ -332,7 +330,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     LOG_INF("Starting motor control in 2 seconds...");
     k_msleep(2000);
 
-    /* Start 10 kHz (100 µs) FOC control loop */
+    /* Start 10 kHz (100 ┬Ás) FOC control loop */
     g_motor_ptr = motor;
     /* DEBUG: timer/thread disabled, haptic_loop called from main */
     k_timer_init(&haptic_timer, haptic_timer_cb, NULL);
@@ -341,7 +339,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
                    haptic_thread_fn, NULL, NULL, NULL,
                    HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&haptic_thread_data, "haptic_foc");
-    k_timer_start(&haptic_timer, K_MSEC(1), K_MSEC(1));  /* 1 kHz — matches reference */
+    k_timer_start(&haptic_timer, K_MSEC(1), K_MSEC(1));  /* 1 kHz ÔÇö matches reference */
 
     return 0;
 }
@@ -357,8 +355,8 @@ void haptic_loop(bldc_motor_t *motor)
     sensor_update(motor->sensor);
     float current_angle = sensor_get_angle(motor->sensor);
 
-    /* Instantaneous velocity: differentiate encoder angle, LPF α=0.1 at 1 kHz.
-     * α=0.1 at 1 kHz → ~16 Hz bandwidth (matches reference project exactly).
+    /* Instantaneous velocity: differentiate encoder angle, LPF ╬▒=0.1 at 1 kHz.
+     * ╬▒=0.1 at 1 kHz Ôćĺ ~16 Hz bandwidth (matches reference project exactly).
      * At 1 kHz a 1-LSB encoder spike is 0.38 rad/s vs 3.8 rad/s at 10 kHz. */
     if (haptic_prev_angle < 0.0f) haptic_prev_angle = current_angle;
     float d_ang = current_angle - haptic_prev_angle;
@@ -367,7 +365,7 @@ void haptic_loop(bldc_motor_t *motor)
     haptic_prev_angle = current_angle;
     /* Fast estimate for detent mode (16 Hz BW) */
     haptic_inst_vel = VEL_LPF_ALPHA * (d_ang * 1000.0f) + (1.0f - VEL_LPF_ALPHA) * haptic_inst_vel;
-    /* Slow estimate for smooth mode (~1.6 Hz BW) — stays non-zero between encoder ticks */
+    /* Slow estimate for smooth mode (~1.6 Hz BW) ÔÇö stays non-zero between encoder ticks */
     smooth_vel = SMOOTH_VEL_ALPHA * (d_ang * 1000.0f) + (1.0f - SMOOTH_VEL_ALPHA) * smooth_vel;
     cumulative_angle += d_ang;
 
@@ -394,10 +392,6 @@ void haptic_loop(bldc_motor_t *motor)
         detent_nudge_dir = 0;
         detent_nudge_start_ms = 0;
         detent_nudge_fired = false;
-        mode_gesture_state = MODE_GESTURE_IDLE;
-        mode_gesture_origin_index = 0;
-        mode_gesture_dir = 0;
-        mode_gesture_start_ms = 0;
         detent_prev_init = false;
         LOG_INF("mode=%s num_steps=%d",
                 (num_steps == 0) ? "smooth" : "detent", num_steps);
@@ -417,6 +411,15 @@ void haptic_loop(bldc_motor_t *motor)
         float abs_rel_to_detent = (rel_to_detent < 0.0f) ? -rel_to_detent : rel_to_detent;
         bool smooth_nav_locked = smooth_vdetent_armed && (abs_rel_to_detent < step_rad * 0.5f);
 
+        /* --- Debug: rate-limited state dump every 2 s --- */
+        static int dbg_ctr = 0;
+        if (++dbg_ctr >= 2000) {
+            dbg_ctr = 0;
+            LOG_INF("HAPTIC smooth: armed=%d locked=%d cum=%.3f vel=%.4f",
+                    smooth_vdetent_armed, smooth_nav_locked,
+                    (double)cumulative_angle, (double)smooth_vel);
+        }
+
         /* ---- Navigation: always active, independent of arm state.
          * Counts mechanical steps exactly like detent mode; fires g_step_cb. */
         if (!smooth_nav_locked) {
@@ -429,6 +432,8 @@ void haptic_loop(bldc_motor_t *motor)
             if (delta != 0) {
                 int dir = (delta > 0) ? 1 : -1;
                 int steps = (delta > 0) ? delta : -delta;
+                LOG_INF("HAPTIC step_cb dir=%d steps=%d cum=%.3f",
+                        dir, steps, (double)cumulative_angle);
                 for (int i = 0; i < steps; i++) {
                     if (g_step_cb) {
                         g_step_cb(dir);
@@ -528,7 +533,6 @@ void haptic_loop(bldc_motor_t *motor)
         target_voltage = smooth_v_filt;
     } else {
         /* ---- Detent mode: sinusoidal spring + velocity damping ---- */
-        int64_t now_ms = k_uptime_get();
         float step_size  = _2PI / (float)num_steps;
         float normalized = cumulative_angle / step_size;
         float nearest_f  = roundf(normalized);
@@ -552,8 +556,8 @@ void haptic_loop(bldc_motor_t *motor)
             prev_detent_index = current_detent_index;
         }
 
-        /* Error from nearest detent centre ∈ (-0.5, 0.5).
-         * Spring restores toward zero: -A·sin(2π·err) pulls back. */
+        /* Error from nearest detent centre Ôłł (-0.5, 0.5).
+         * Spring restores toward zero: -A┬Ěsin(2¤Ç┬Ěerr) pulls back. */
         float norm_err = normalized - nearest_f;
 
         /* Virtual click dead zone: arm only when knob is held near the snap point
@@ -564,14 +568,8 @@ void haptic_loop(bldc_motor_t *motor)
             int snap_dir = (norm_err > 0.0f) ? 1 : -1;
 
             if (abs_norm_err >= GESTURE_ARM_ZONE_MIN) {
-                float abs_vel_now = (haptic_inst_vel < 0.0f) ? -haptic_inst_vel : haptic_inst_vel;
-                if (abs_vel_now > GESTURE_ARM_VEL_MAX) {
-                    /* Knob still moving — reset arm timer so click only fires when
-                     * the user has genuinely stopped at the edge, not during transit. */
-                    detent_nudge_dir = 0;
-                    detent_nudge_start_ms = 0;
-                } else if (detent_nudge_fired) {
-                    /* already triggered once — wait for user to return to centre */
+                if (detent_nudge_fired) {
+                    /* already triggered once ÔÇö wait for user to return to centre */
                 } else if (detent_nudge_dir == 0 || snap_dir != detent_nudge_dir) {
                     detent_nudge_dir = snap_dir;
                     detent_nudge_start_ms = k_uptime_get();
@@ -582,88 +580,12 @@ void haptic_loop(bldc_motor_t *motor)
                     detent_nudge_dir = 0;
                     detent_nudge_start_ms = 0;
                     detent_nudge_fired = true;
+                    /* Reserved: check (now - start) >= VCLICK_LONG_HOLD_MS for TODO 2.b */
                 }
             } else {
                 detent_nudge_dir = 0;
                 detent_nudge_start_ms = 0;
                 detent_nudge_fired = false;
-            }
-        }
-
-        /* Mode menu gesture (detent-only), strict quick pattern:
-         * 1) start in origin center (i)
-         * 2) hit adjacent center (i+1 or i-1)
-         * 3) reverse and hit opposite adjacent center (i-1 or i+1)
-         * Any excursion beyond +/-1 detent from origin cancels gesture.
-         */
-        {
-            float abs_norm_err = (norm_err < 0.0f) ? -norm_err : norm_err;
-            bool near_center = (abs_norm_err <= MODE_MENU_CENTER_ZONE_NORM);
-            bool gesture_timeout = (mode_gesture_start_ms != 0) &&
-                                   ((now_ms - mode_gesture_start_ms) > MODE_MENU_GESTURE_TIMEOUT_MS);
-
-            if (gesture_timeout) {
-                mode_gesture_state = MODE_GESTURE_IDLE;
-                mode_gesture_start_ms = 0;
-                mode_gesture_dir = 0;
-            }
-
-            switch (mode_gesture_state) {
-            case MODE_GESTURE_IDLE:
-                if (near_center) {
-                    mode_gesture_state = MODE_GESTURE_WAIT_FIRST_ADJACENT_CENTER;
-                    mode_gesture_origin_index = current_detent_index;
-                    mode_gesture_start_ms = now_ms;
-                    mode_gesture_dir = 0;
-                }
-                break;
-
-            case MODE_GESTURE_WAIT_FIRST_ADJACENT_CENTER:
-                if (near_center) {
-                    int di = current_detent_index - mode_gesture_origin_index;
-                    if (di == 1 || di == -1) {
-                        mode_gesture_dir = (di > 0) ? 1 : -1;
-                        mode_gesture_state = MODE_GESTURE_WAIT_OPPOSITE_ADJACENT_CENTER;
-                    } else if (di > 1 || di < -1) {
-                        mode_gesture_state = MODE_GESTURE_IDLE;
-                        mode_gesture_start_ms = 0;
-                        mode_gesture_dir = 0;
-                    }
-                }
-                break;
-
-            case MODE_GESTURE_WAIT_OPPOSITE_ADJACENT_CENTER:
-                {
-                    int di = current_detent_index - mode_gesture_origin_index;
-                    if (di > 1 || di < -1) {
-                        /* Long rotation / multi-step overshoot: explicitly reject. */
-                        mode_gesture_state = MODE_GESTURE_IDLE;
-                        mode_gesture_start_ms = 0;
-                        mode_gesture_dir = 0;
-                        break;
-                    }
-
-                    /* Need opposite adjacent center after reversal.
-                     * First leg +1 => final target -1, and vice versa. */
-                    if (near_center && mode_gesture_dir != 0 && di == -mode_gesture_dir) {
-                        if ((now_ms - mode_gesture_last_fire_ms) >= MODE_MENU_GESTURE_COOLDOWN_MS) {
-                            if (g_mode_menu_gesture_cb) {
-                                g_mode_menu_gesture_cb();
-                            }
-                            mode_gesture_last_fire_ms = now_ms;
-                        }
-
-                        mode_gesture_state = MODE_GESTURE_IDLE;
-                        mode_gesture_start_ms = 0;
-                        mode_gesture_dir = 0;
-
-                        /* Prevent accidental immediate click after opening mode menu. */
-                        detent_nudge_dir = 0;
-                        detent_nudge_start_ms = 0;
-                        detent_nudge_fired = true;
-                    }
-                }
-                break;
             }
         }
 
@@ -682,7 +604,7 @@ void haptic_loop(bldc_motor_t *motor)
     }
 
     /* move() sets target, loop_foc() applies it using fresh electrical angle.
-     * Order MUST be: move → loop_foc  (SimpleFOC contract). */
+     * Order MUST be: move Ôćĺ loop_foc  (SimpleFOC contract). */
     bldc_motor_move(motor, target_voltage);
     bldc_motor_loop_foc(motor);
 }
