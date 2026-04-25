@@ -3,10 +3,15 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(remote_two)
 
-# DEBUG BUILD: display only — all other peripherals stripped
 target_sources(app PRIVATE
     src/main.c
     src/ui_display.c
+    src/haptic.c
+    src/remote_control.c
+    src/BLE_commands.c
+    src/drivers/as5048a.c
+    src/drivers/bldc_driver_6pwm.c
+    src/drivers/bldc_motor.c
 )
 
 target_include_directories(app PRIVATE src)
