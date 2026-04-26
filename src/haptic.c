@@ -144,7 +144,6 @@ void haptic_set_virtual_click_callback(void (*cb)(int dir))
 static void haptic_thread_fn(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
-    LOG_INF(">>> HAPTIC THREAD STARTED <<<");
     while (1) {
         k_sem_take(&haptic_sem, K_FOREVER);
         haptic_loop(g_motor_ptr);
@@ -411,15 +410,6 @@ void haptic_loop(bldc_motor_t *motor)
         float abs_rel_to_detent = (rel_to_detent < 0.0f) ? -rel_to_detent : rel_to_detent;
         bool smooth_nav_locked = smooth_vdetent_armed && (abs_rel_to_detent < step_rad * 0.5f);
 
-        /* --- Debug: rate-limited state dump every 2 s --- */
-        static int dbg_ctr = 0;
-        if (++dbg_ctr >= 2000) {
-            dbg_ctr = 0;
-            LOG_INF("HAPTIC smooth: armed=%d locked=%d cum=%.3f vel=%.4f",
-                    smooth_vdetent_armed, smooth_nav_locked,
-                    (double)cumulative_angle, (double)smooth_vel);
-        }
-
         /* ---- Navigation: always active, independent of arm state.
          * Counts mechanical steps exactly like detent mode; fires g_step_cb. */
         if (!smooth_nav_locked) {
@@ -432,8 +422,6 @@ void haptic_loop(bldc_motor_t *motor)
             if (delta != 0) {
                 int dir = (delta > 0) ? 1 : -1;
                 int steps = (delta > 0) ? delta : -delta;
-                LOG_INF("HAPTIC step_cb dir=%d steps=%d cum=%.3f",
-                        dir, steps, (double)cumulative_angle);
                 for (int i = 0; i < steps; i++) {
                     if (g_step_cb) {
                         g_step_cb(dir);

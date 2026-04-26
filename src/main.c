@@ -31,7 +31,8 @@ int main(void)
 	haptic_init(&motor, (bldc_driver_t *)&driver, (sensor_t *)&encoder);
 
 	while (1) {
+		remote_control_tick();
 		ui_display_process();
-		k_msleep(50);
+		k_msleep(15);
 	}
 }

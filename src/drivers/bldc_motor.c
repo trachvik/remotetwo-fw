@@ -531,8 +531,6 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
 {
     if (motor == NULL) return 0;
     
-    LOG_INF("FOC: start, sensor_dir=%d zero_el=%.3f",
-            motor->sensor_direction, (double)motor->zero_electric_angle);
     motor->motor_status = MOTOR_CALIBRATING;
     
     /* If no sensor, only openloop is possible */
@@ -547,7 +545,6 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
     }*/
     
     /* Sensor detected - perform alignment */
-    LOG_INF("FOC: sensor_update before needs_search");
     sensor_update(motor->sensor);
     
     /* Check if sensor needs index search */
@@ -560,9 +557,7 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
     float voltage_align = motor->voltage_sensor_align;
     
     /* Determine sensor direction if unknown */
-    LOG_INF("FOC: sensor_dir=%d (0=unknown,1=CW,2=CCW)", motor->sensor_direction);
     if (motor->sensor_direction == DIR_UNKNOWN) {
-        LOG_INF("FOC: direction search start");
         /* Gradually ramp up voltage to avoid sudden jerk */
         for (int i = 0; i < 100; i++) {
             float voltage_ramp = voltage_align * i / 100.0f;
@@ -571,7 +566,6 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
         }
         k_msleep(300);
         
-        LOG_INF("FOC: ramp-up done, fwd loop start");
         /* Move one electrical revolution forward - smoother with more steps */
         for (int i = 0; i <= 1000; i++) {
             float angle = _3PI_2 + _2PI * i / 1000.0f;
@@ -579,13 +573,10 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
             sensor_update(motor->sensor);
             k_msleep(1);  /* 1ms for smoother motion */
         }
-        LOG_INF("FOC: fwd loop done");
-        
         /* Read angle in the middle */
         sensor_update(motor->sensor);
         float mid_angle = sensor_get_angle(motor->sensor);
         
-        LOG_INF("FOC: mid_angle=%.4f, bwd loop start", (double)mid_angle);
         /* Move one electrical revolution backward */
         for (int i = 1000; i >= 0; i--) {
             float angle = _3PI_2 + _2PI * i / 1000.0f;
@@ -593,8 +584,6 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
             sensor_update(motor->sensor);
             k_msleep(1);  /* 1ms for smoother motion */
         }
-        LOG_INF("FOC: bwd loop done");
-        
         /* Gradually ramp down voltage */
         for (int i = 100; i >= 0; i--) {
             float voltage_ramp = voltage_align * i / 100.0f;

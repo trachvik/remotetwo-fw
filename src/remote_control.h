@@ -61,5 +61,6 @@ typedef enum {
 } sheet_item_t;
 
 void remote_control_init(void);
+void remote_control_tick(void); /* call periodically from main loop */
 
 #endif /* REMOTE_CONTROL_H */

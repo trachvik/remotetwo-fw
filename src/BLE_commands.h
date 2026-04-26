@@ -20,8 +20,14 @@ struct ble_printer_state {
 	float pos_z;
 	float pos_e;
 
-	float temp_e;
-	float temp_b;
+	float temp_e;        /* extruder temperature [°C] */
+	float temp_b;        /* bed temperature [°C] */
+
+	float fan_pct;       /* part cooling fan 0-100 % */
+	float feed_rate_pct; /* feed rate override 0-999 % */
+	float progress_pct;  /* print progress 0-100 % */
+	uint32_t print_secs; /* elapsed print time [s] */
+	char status_msg[20]; /* short printer status string, e.g. "Ready" */
 };
 
 struct ble_last_ack {

@@ -1,11 +1,13 @@
 #include "remote_control.h"
 #include "BLE_commands.h"
 #include "haptic.h"
+#include "ui_display.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 LOG_MODULE_REGISTER(remote_control, LOG_LEVEL_DBG);
 
@@ -79,10 +81,127 @@ static haptic_mode_menu_state_t g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
 static haptic_mode_item_t g_haptic_mode_sel = HAPTIC_MODE_SMOOTH;
 static struct k_work_delayable g_click_eval_work;
 static int g_pending_click_dir = 0;
+/* UI updates are prepared by callbacks but pushed to display only from
+ * remote_control_tick() in the main loop to avoid cross-thread UI races. */
+static atomic_t g_menu_refresh_pending = ATOMIC_INIT(0);
+static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 
-#define DOUBLE_CLICK_WINDOW_MS 350
+#define DOUBLE_CLICK_WINDOW_MS  350
+#define SMOOTH_MENU_STEP_DIV    3
+#define DISPLAY_IDLE_TIMEOUT_MS 5000
 
-#define SMOOTH_MENU_STEP_DIV 3
+/* --- 5-second inactivity timer: switch back to status screen --- */
+static struct k_work_delayable g_idle_disp_work;
+
+static inline void request_menu_refresh(void)
+{
+    atomic_set(&g_menu_refresh_pending, 1);
+}
+
+static inline void request_status_mode(void)
+{
+    atomic_set(&g_status_mode_pending, 1);
+    /* Prevent a stale pending menu refresh from immediately switching back. */
+    atomic_set(&g_menu_refresh_pending, 0);
+}
+
+static void idle_disp_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    request_status_mode();
+}
+
+static void disp_reset_idle_timer(void)
+{
+    k_work_reschedule(&g_idle_disp_work, K_MSEC(DISPLAY_IDLE_TIMEOUT_MS));
+}
+
+/* Forward declaration (defined later in this file) */
+static const param_desc_t *find_param_desc(edit_target_t target);
+
+/* --- Build and push current menu to display --- */
+static void display_push_menu(void)
+{
+    /* Edit mode: show value edit screen instead of menu */
+    if (g_ui_mode == UI_MODE_EDIT) {
+        const param_desc_t *desc = find_param_desc(g_edit_target);
+        if (desc != NULL) {
+            char val_str[16];
+            (void)snprintf(val_str, sizeof(val_str), desc->fmt, (double)g_edit_value);
+            ui_display_update_edit(desc->name, val_str);
+            disp_reset_idle_timer();
+        }
+        return;
+    }
+
+    const char *names[16];
+    int count = 0;
+    int sel   = 0;
+    const char *header = "";
+
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
+        header = "Haptic Mode";
+        static const char *hm[] = {"Smooth","Step 16","Step 12","Step 8"};
+        count = HAPTIC_MODE_ITEM_COUNT;
+        for (int i = 0; i < count; i++) names[i] = hm[i];
+        sel = (int)g_haptic_mode_sel;
+        ui_display_update_menu(g_level, sel, count, names, header);
+        disp_reset_idle_timer();
+        return;
+    }
+
+    switch (g_level) {
+    case MENU_LEVEL_ROOT:
+        header = "Menu";
+        names[0] = "Position";
+        names[1] = "Temperature";
+        names[2] = "Print tool";
+        names[3] = "Z-offset";
+        names[4] = "Macros";
+        count = ROOT_ITEM_COUNT - 1; /* skip ROOT_STATUS_MENU (index 0) */
+        /* Map g_root_sel (skipping 0) to display index */
+        sel = (int)g_root_sel - 1;
+        if (sel < 0) sel = 0;
+        break;
+    case MENU_LEVEL_POSITION:
+        header = "Position";
+        names[0] = "X"; names[1] = "Y"; names[2] = "Z"; names[3] = "E";
+        count = POS_ITEM_COUNT;
+        sel   = (int)g_pos_sel;
+        break;
+    case MENU_LEVEL_TEMPERATURE:
+        header = "Temperature";
+        names[0] = "Extruder"; names[1] = "Bed";
+        count = TEMP_ITEM_COUNT;
+        sel   = (int)g_temp_sel;
+        break;
+    case MENU_LEVEL_TOOL:
+        header = "Print Tool";
+        names[0]="T0"; names[1]="T1"; names[2]="T2"; names[3]="T3";
+        names[4]="T4"; names[5]="T5"; names[6]="T6"; names[7]="T7"; names[8]="T8";
+        count = TOOL_ITEM_COUNT;
+        sel   = (int)g_tool_sel;
+        break;
+    case MENU_LEVEL_MACROS:
+        header = "Macros";
+        names[0] = "Change sheet";
+        names[1] = g_light_on ? "Light ON" : "Light OFF";
+        count = MACROS_ITEM_COUNT;
+        sel   = (int)g_macros_sel;
+        break;
+    case MENU_LEVEL_SHEET:
+        header = "Sheet";
+        names[0] = "Custom 0"; names[1] = "Custom 1"; names[2] = "Custom 2";
+        count = SHEET_ITEM_COUNT;
+        sel   = (int)g_sheet_sel;
+        break;
+    default:
+        return;
+    }
+
+    ui_display_update_menu(g_level, sel, count, names, header);
+    disp_reset_idle_timer();
+}
 
 static int wrap_step_int(int value, int count, int dir)
 {
@@ -277,10 +396,11 @@ static void log_menu_state(const char *reason)
     if (g_ui_mode == UI_MODE_EDIT) {
         LOG_INF("MENU %s | mode=EDIT | level=%s | selected=%s | value=%.2f",
                 reason, level_name(g_level), current_selection_name(), (double)g_edit_value);
-        return;
+    } else {
+        LOG_INF("MENU %s | mode=NAV | level=%s | selected=%s",
+                reason, level_name(g_level), current_selection_name());
     }
-    LOG_INF("MENU %s | mode=NAV | level=%s | selected=%s",
-            reason, level_name(g_level), current_selection_name());
+    request_menu_refresh();
 }
 
 static void send_text_gcode(const char *code)
@@ -347,8 +467,8 @@ static void confirm_edit_and_send(void)
         tx_value = g_edit_value - g_edit_base_value;
     }
 
-    if (is_position_target(g_edit_target)) {
-        /* Position is applied on each knob step; confirm only exits edit mode. */
+    if (is_position_target(g_edit_target) || g_edit_target == EDIT_ZOFFSET) {
+        /* Applied on each knob step; confirm only exits edit mode. */
         g_ui_mode = UI_MODE_NAV;
         g_edit_target = EDIT_NONE;
         log_menu_state("exit edit");
@@ -395,7 +515,6 @@ static void toggle_light(void)
 
 static void on_knob_step(int dir)
 {
-    LOG_INF("on_knob_step dir=%d accum=%d ns=%d", dir, g_smooth_nav_accum, haptic_get_num_steps());
     if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         g_haptic_mode_sel = (haptic_mode_item_t)wrap_step_int(
             (int)g_haptic_mode_sel, HAPTIC_MODE_ITEM_COUNT, dir);
@@ -427,6 +546,21 @@ static void on_knob_step(int dir)
                 send_position_delta(desc->token[3], delta);
                 g_edit_base_value += delta;
             }
+        } else if (g_edit_target == EDIT_ZOFFSET) {
+            if (!ble_printer_can_move()) {
+                LOG_WRN("Move blocked: printer reports can_move=0");
+                g_edit_value = prev_value;
+                return;
+            }
+            float delta = g_edit_value - prev_value;
+            if (fabsf(delta) >= 0.0001f) {
+                char cmd[20];
+                char val_str[12];
+                (void)snprintf(val_str, sizeof(val_str), desc->fmt, (double)delta);
+                (void)snprintf(cmd, sizeof(cmd), "%s:%s", desc->token, val_str);
+                send_text_gcode(cmd);
+                g_edit_base_value += delta;
+            }
         }
 
         LOG_INF("Edit dir=%d step=%.3f val=%.2f", dir, (double)step, (double)g_edit_value);
@@ -455,7 +589,13 @@ static void on_knob_step(int dir)
 
     switch (g_level) {
     case MENU_LEVEL_ROOT:
-        g_root_sel = (root_item_t)wrap_step_int((int)g_root_sel, ROOT_ITEM_COUNT, dir);
+        {
+            /* Navigate only among real menu items (skip ROOT_STATUS_MENU index 0) */
+            int idx = (int)g_root_sel - 1;
+            if (idx < 0) idx = 0;
+            idx = wrap_step_int(idx, ROOT_ITEM_COUNT - 1, dir);
+            g_root_sel = (root_item_t)(idx + 1);
+        }
         break;
     case MENU_LEVEL_POSITION:
         g_pos_sel = (position_item_t)wrap_step_int((int)g_pos_sel, POS_ITEM_COUNT, dir);
@@ -480,6 +620,8 @@ static void on_knob_step(int dir)
 
 static void on_confirm_action(void)
 {
+    ui_display_flash_confirm();
+
     if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         int steps = haptic_mode_item_to_steps(g_haptic_mode_sel);
         haptic_set_num_steps(steps);
@@ -579,6 +721,8 @@ static void on_confirm_action(void)
 
 static void on_back_action(void)
 {
+    ui_display_flash_back();
+
     if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
         log_menu_state("mode cancel");
@@ -594,7 +738,10 @@ static void on_back_action(void)
 
     switch (g_level) {
     case MENU_LEVEL_ROOT:
-        log_menu_state("back (root)");
+        /* Back at root level → return to status screen */
+        LOG_INF("MENU back (root) | mode=NAV | level=ROOT");
+        k_work_cancel_delayable(&g_idle_disp_work);
+        request_status_mode();
         return;
     case MENU_LEVEL_POSITION:
         g_level = MENU_LEVEL_ROOT;
@@ -630,9 +777,9 @@ static void on_virtual_click(int dir)
 {
     if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         if (dir >= 0) {
-            on_confirm_action();
-        } else {
             on_back_action();
+        } else {
+            on_confirm_action();
         }
         return;
     }
@@ -649,9 +796,9 @@ static void on_virtual_click(int dir)
     if (g_pending_click_dir != 0 && g_pending_click_dir != dir) {
         k_work_cancel_delayable(&g_click_eval_work);
         if (g_pending_click_dir >= 0) {
-            on_confirm_action();
-        } else {
             on_back_action();
+        } else {
+            on_confirm_action();
         }
         g_pending_click_dir = 0;
     }
@@ -666,9 +813,9 @@ static void click_eval_work_handler(struct k_work *work)
     int dir = g_pending_click_dir;
     g_pending_click_dir = 0;
     if (dir >= 0) {
-        on_confirm_action();
-    } else {
         on_back_action();
+    } else {
+        on_confirm_action();
     }
 }
 
@@ -680,7 +827,7 @@ void remote_control_init(void)
     }
 
     g_level       = MENU_LEVEL_ROOT;
-    g_root_sel    = ROOT_STATUS_MENU;
+    g_root_sel    = ROOT_POSITION;
     g_pos_sel     = POS_X;
     g_temp_sel    = TEMP_EXTRUDER;
     g_tool_sel    = TOOL_T0;
@@ -692,10 +839,52 @@ void remote_control_init(void)
     g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
     g_haptic_mode_sel = haptic_mode_steps_to_item(haptic_get_num_steps());
     g_pending_click_dir = 0;
+    atomic_set(&g_menu_refresh_pending, 0);
+    atomic_set(&g_status_mode_pending, 0);
     k_work_init_delayable(&g_click_eval_work, click_eval_work_handler);
+    k_work_init_delayable(&g_idle_disp_work, idle_disp_work_handler);
     haptic_set_step_callback(on_knob_step);
     haptic_set_virtual_click_callback(on_virtual_click);
     LOG_INF("Remote menu init (single click=confirm/back, double click=mode menu)");
     log_menu_state("init");
+    /* Keep boot/wake default on status screen. init logging queues a menu
+     * refresh, so clear it explicitly. */
+    atomic_set(&g_menu_refresh_pending, 0);
+    ui_display_set_mode(UI_DISP_STATUS);
 }
 
+void remote_control_tick(void)
+{
+    if (atomic_cas(&g_status_mode_pending, 1, 0)) {
+        ui_display_set_mode(UI_DISP_STATUS);
+    }
+
+    /* Called periodically from main loop. Push current BLE state to status
+     * screen so the display reflects live printer data. */
+    struct ble_printer_state st;
+    if (ble_printer_state_get(&st)) {
+        /* Fill in fields not yet provided by BLE (future expansion) */
+        if (st.fan_pct == 0.0f && !st.printing) {
+            /* keep zero */
+        }
+        if (st.feed_rate_pct == 0.0f) {
+            st.feed_rate_pct = 100.0f; /* default */
+        }
+        if (st.status_msg[0] == '\0') {
+            if (st.printing) {
+                (void)strncpy(st.status_msg, "Printing", sizeof(st.status_msg) - 1);
+            } else {
+                (void)strncpy(st.status_msg, "Ready", sizeof(st.status_msg) - 1);
+            }
+        }
+    } else {
+        /* No BLE data: send invalid state so display shows "No printer data" */
+        (void)memset(&st, 0, sizeof(st));
+        st.valid = false;
+    }
+    ui_display_update_status(&st);
+
+    if (atomic_cas(&g_menu_refresh_pending, 1, 0)) {
+        display_push_menu();
+    }
+}
