@@ -2,22 +2,22 @@
  * Device Tree overlay for nRF5340 DK - remote_two
  *
  * AS5048A encoder (SPI3):
- *   SCK  -> P0.06
- *   MOSI -> P0.07
- *   MISO -> P0.25
- *   CS   -> P0.26
+ *   SCK  -> P1.05
+ *   MOSI -> P1.06
+ *   MISO -> P1.02
+ *   CS   -> P1.03
  *
  * SSD1309 OLED (shared SPI3 bus):
- *   CS   -> P1.12
- *   DC   -> P1.06
- *   RST  -> P1.04
+ *   CS   -> P1.09
+ *   DC   -> P1.08
+ *   RST  -> P1.07
  *
  * 6PWM motor driver:
- *   Phase A high -> P1.05
- *   Phase B high -> P1.07
- *   Phase C high -> P1.08
- *   Phase A low  -> P1.09
- *   Phase B low  -> P1.10
+ *   Phase A high -> P1.14
+ *   Phase B high -> P1.12
+ *   Phase C high -> P1.10
+ *   Phase A low  -> P1.15
+ *   Phase B low  -> P1.13
  *   Phase C low  -> P1.11
  */
 
@@ -25,49 +25,49 @@
 	/* SPI3 - AS5048A encoder + SSD1309 display */
 	spi3_default: spi3_default {
 		group1 {
-			psels = <NRF_PSEL(SPIM_SCK,  0, 6)>,
-				<NRF_PSEL(SPIM_MOSI, 0, 7)>,
-				<NRF_PSEL(SPIM_MISO, 0, 25)>;
+			psels = <NRF_PSEL(SPIM_SCK,  1, 5)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 6)>,
+				<NRF_PSEL(SPIM_MISO, 1, 2)>;
 		};
 	};
 	spi3_sleep: spi3_sleep {
 		group1 {
-			psels = <NRF_PSEL(SPIM_SCK,  0, 6)>,
-				<NRF_PSEL(SPIM_MOSI, 0, 7)>,
-				<NRF_PSEL(SPIM_MISO, 0, 25)>;
+			psels = <NRF_PSEL(SPIM_SCK,  1, 5)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 6)>,
+				<NRF_PSEL(SPIM_MISO, 1, 2)>;
 			low-power-enable;
 		};
 	};
 
-	/* PWM0 - high-side gate signals */
+	/* PWM0 - high-side gate signals (AH=OUT0, BH=OUT1, CH=OUT2) */
 	pwm0_default: pwm0_default {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 5)>,
-				<NRF_PSEL(PWM_OUT1, 1, 7)>,
-				<NRF_PSEL(PWM_OUT2, 1, 8)>;
+			psels = <NRF_PSEL(PWM_OUT0, 1, 14)>,
+				<NRF_PSEL(PWM_OUT1, 1, 12)>,
+				<NRF_PSEL(PWM_OUT2, 1, 10)>;
 		};
 	};
 	pwm0_sleep: pwm0_sleep {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 5)>,
-				<NRF_PSEL(PWM_OUT1, 1, 7)>,
-				<NRF_PSEL(PWM_OUT2, 1, 8)>;
+			psels = <NRF_PSEL(PWM_OUT0, 1, 14)>,
+				<NRF_PSEL(PWM_OUT1, 1, 12)>,
+				<NRF_PSEL(PWM_OUT2, 1, 10)>;
 			low-power-enable;
 		};
 	};
 
-	/* PWM1 - low-side gate signals */
+	/* PWM1 - low-side gate signals (AL=OUT0, BL=OUT1, CL=OUT2) */
 	pwm1_default: pwm1_default {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 9)>,
-				<NRF_PSEL(PWM_OUT1, 1, 10)>,
+			psels = <NRF_PSEL(PWM_OUT0, 1, 15)>,
+				<NRF_PSEL(PWM_OUT1, 1, 13)>,
 				<NRF_PSEL(PWM_OUT2, 1, 11)>;
 		};
 	};
 	pwm1_sleep: pwm1_sleep {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 1, 9)>,
-				<NRF_PSEL(PWM_OUT1, 1, 10)>,
+			psels = <NRF_PSEL(PWM_OUT0, 1, 15)>,
+				<NRF_PSEL(PWM_OUT1, 1, 13)>,
 				<NRF_PSEL(PWM_OUT2, 1, 11)>;
 			low-power-enable;
 		};
@@ -81,8 +81,8 @@
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
-	cs-gpios = <&gpio0 26 GPIO_ACTIVE_LOW>,
-		   <&gpio1 12 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio1 3 GPIO_ACTIVE_LOW>,
+		   <&gpio1 9 GPIO_ACTIVE_LOW>;
 
 	as5048a: as5048a@0 {
 		compatible = "ams,as5048a";
@@ -103,8 +103,8 @@
 		segment-remap;
 		com-invdir;
 		prechargep = <0xF1>;
-		reset-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
-		data-cmd-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
+		data-cmd-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;
 	};
 };
 
@@ -129,10 +129,24 @@ pwm_low: &pwm1 {
 		zephyr,display = &ssd1309;
 	};
 
+	/*
+	 * 6PWM BLDC driver — channel order: AH, AL, BH, BL, CH, CL.
+	 * To remap phases to different pins change only the pinctrl entries above;
+	 * to swap which channel drives which phase edit the pwms list here.
+	 * No C code needs to be touched.
+	 */
+	bldc_6pwm: bldc_6pwm {
+		compatible = "remote-two,bldc-6pwm";
+		pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase A high */
+		       <&pwm1 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase A low  */
+		       <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase B high */
+		       <&pwm1 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase B low  */
+		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase C high */
+		       <&pwm1 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>;   /* Phase C low  */
+	};
+
 	aliases {
 		sw1 = &button1;
-		sw2 = &button2;
-		sw3 = &button3;
 	};
 
 	buttons {
@@ -141,16 +155,6 @@ pwm_low: &pwm1 {
 			gpios = <&gpio0 24 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Menu button";
 			zephyr,code = <INPUT_KEY_ENTER>;
-		};
-		button2: button_2 {
-			gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Nav down";
-			zephyr,code = <INPUT_KEY_LEFT>;
-		};
-		button3: button_3 {
-			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Nav up";
-			zephyr,code = <INPUT_KEY_RIGHT>;
 		};
 	};
 };

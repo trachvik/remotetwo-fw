@@ -13,13 +13,14 @@
 #define OUTPUT 1
 #define INPUT 0
 
-/* PWM devicetree nodes */
-#define PWM_LOW_NODE DT_NODELABEL(pwm_low)
-#define PWM_HIGH_NODE DT_NODELABEL(pwm_high)
-
-/* PWM device instances */
-static const struct device *pwm_low_dev = DEVICE_DT_GET(PWM_LOW_NODE);
-static const struct device *pwm_high_dev = DEVICE_DT_GET(PWM_HIGH_NODE);
+/* 6PWM channels from device tree — order: AH, AL, BH, BL, CH, CL */
+#define BLDC_NODE DT_NODELABEL(bldc_6pwm)
+static const struct pwm_dt_spec pwm_ah = PWM_DT_SPEC_GET_BY_IDX(BLDC_NODE, 0);
+static const struct pwm_dt_spec pwm_al = PWM_DT_SPEC_GET_BY_IDX(BLDC_NODE, 1);
+static const struct pwm_dt_spec pwm_bh = PWM_DT_SPEC_GET_BY_IDX(BLDC_NODE, 2);
+static const struct pwm_dt_spec pwm_bl = PWM_DT_SPEC_GET_BY_IDX(BLDC_NODE, 3);
+static const struct pwm_dt_spec pwm_ch = PWM_DT_SPEC_GET_BY_IDX(BLDC_NODE, 4);
+static const struct pwm_dt_spec pwm_cl = PWM_DT_SPEC_GET_BY_IDX(BLDC_NODE, 5);
 
 /* PWM configuration structure */
 typedef struct {
@@ -48,14 +49,11 @@ static void* _configure6PWM(long pwm_frequency, float dead_zone,
                             int pwm_b_h, int pwm_b_l,
                             int pwm_c_h, int pwm_c_l)
 {
-    /* Check if PWM devices are ready */
-    if (!device_is_ready(pwm_low_dev)) {
-        printk("ERROR: PWM low-side device not ready\n");
-        return (void*)-1;
-    }
-    
-    if (!device_is_ready(pwm_high_dev)) {
-        printk("ERROR: PWM high-side device not ready\n");
+    /* Check if all PWM channels are ready */
+    if (!pwm_is_ready_dt(&pwm_ah) || !pwm_is_ready_dt(&pwm_al) ||
+        !pwm_is_ready_dt(&pwm_bh) || !pwm_is_ready_dt(&pwm_bl) ||
+        !pwm_is_ready_dt(&pwm_ch) || !pwm_is_ready_dt(&pwm_cl)) {
+        printk("ERROR: one or more PWM channels not ready\n");
         return (void*)-1;
     }
     
@@ -66,23 +64,16 @@ static void* _configure6PWM(long pwm_frequency, float dead_zone,
     pwm_config.period_ns = 1000000000UL / pwm_frequency;
     pwm_config.configured = true;
     
-    printk("PWM configured: freq=%ld Hz, period=%u ns\n", 
+    printk("PWM configured: freq=%ld Hz, period=%u ns\n",
            pwm_frequency, pwm_config.period_ns);
-    
+
     /* Initialize all channels to 0% duty cycle */
-    /* Channels are 0-based on nRF5340: PWM_OUT0=0, PWM_OUT1=1, PWM_OUT2=2 */
-    pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 0, PWM_POLARITY_NORMAL}, 
-               pwm_config.period_ns, 0);
-    pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 1, PWM_POLARITY_NORMAL}, 
-               pwm_config.period_ns, 0);
-    pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 2, PWM_POLARITY_NORMAL}, 
-               pwm_config.period_ns, 0);
-    pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 0, PWM_POLARITY_NORMAL}, 
-               pwm_config.period_ns, 0);
-    pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 1, PWM_POLARITY_NORMAL}, 
-               pwm_config.period_ns, 0);
-    pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 2, PWM_POLARITY_NORMAL}, 
-               pwm_config.period_ns, 0);
+    pwm_set_dt(&pwm_ah, pwm_config.period_ns, 0);
+    pwm_set_dt(&pwm_al, pwm_config.period_ns, 0);
+    pwm_set_dt(&pwm_bh, pwm_config.period_ns, 0);
+    pwm_set_dt(&pwm_bl, pwm_config.period_ns, 0);
+    pwm_set_dt(&pwm_ch, pwm_config.period_ns, 0);
+    pwm_set_dt(&pwm_cl, pwm_config.period_ns, 0);
     
     return &pwm_config;
 }
@@ -107,55 +98,43 @@ static void _writeDutyCycle6PWM(float dc_a, float dc_b, float dc_c,
     if (pulse_b > pwm_config.period_ns) pulse_b = pwm_config.period_ns;
     if (pulse_c > pwm_config.period_ns) pulse_c = pwm_config.period_ns;
     
-    /* Phase A high=PWM0 ch0, low=PWM1 ch0 */
+    /* Phase A high=AH, low=AL */
     if (phase_state[0] == PHASE_ON || phase_state[0] == PHASE_HI) {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 0, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, pulse_a);
+        pwm_set_dt(&pwm_ah, pwm_config.period_ns, pulse_a);
     } else {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 0, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, 0);
+        pwm_set_dt(&pwm_ah, pwm_config.period_ns, 0);
     }
-    
+
     if (phase_state[0] == PHASE_ON || phase_state[0] == PHASE_LO) {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 0, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, pwm_config.period_ns - pulse_a);
+        pwm_set_dt(&pwm_al, pwm_config.period_ns, pwm_config.period_ns - pulse_a);
     } else {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 0, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, 0);
+        pwm_set_dt(&pwm_al, pwm_config.period_ns, 0);
     }
-    
-    /* Phase B high=PWM0 ch1, low=PWM1 ch1 */
+
+    /* Phase B high=BH, low=BL */
     if (phase_state[1] == PHASE_ON || phase_state[1] == PHASE_HI) {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 1, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, pulse_b);
+        pwm_set_dt(&pwm_bh, pwm_config.period_ns, pulse_b);
     } else {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 1, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, 0);
+        pwm_set_dt(&pwm_bh, pwm_config.period_ns, 0);
     }
-    
+
     if (phase_state[1] == PHASE_ON || phase_state[1] == PHASE_LO) {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 1, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, pwm_config.period_ns - pulse_b);
+        pwm_set_dt(&pwm_bl, pwm_config.period_ns, pwm_config.period_ns - pulse_b);
     } else {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 1, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, 0);
+        pwm_set_dt(&pwm_bl, pwm_config.period_ns, 0);
     }
-    
-    /* Phase C high=PWM0 ch2, low=PWM1 ch2 */
+
+    /* Phase C high=CH, low=CL */
     if (phase_state[2] == PHASE_ON || phase_state[2] == PHASE_HI) {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 2, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, pulse_c);
+        pwm_set_dt(&pwm_ch, pwm_config.period_ns, pulse_c);
     } else {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_high_dev, 2, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, 0);
+        pwm_set_dt(&pwm_ch, pwm_config.period_ns, 0);
     }
-    
+
     if (phase_state[2] == PHASE_ON || phase_state[2] == PHASE_LO) {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 2, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, pwm_config.period_ns - pulse_c);
+        pwm_set_dt(&pwm_cl, pwm_config.period_ns, pwm_config.period_ns - pulse_c);
     } else {
-        pwm_set_dt(&(struct pwm_dt_spec){pwm_low_dev, 2, PWM_POLARITY_NORMAL},
-                   pwm_config.period_ns, 0);
+        pwm_set_dt(&pwm_cl, pwm_config.period_ns, 0);
     }
 }
 

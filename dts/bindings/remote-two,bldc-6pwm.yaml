@@ -1,0 +1,20 @@
+description: |
+  6-PWM BLDC motor driver pin assignment node.
+  Defines the six PWM channels used to drive a BLDC motor with complementary
+  high-side / low-side switching. Channel order in the pwms property is fixed:
+    index 0 - Phase A high
+    index 1 - Phase A low
+    index 2 - Phase B high
+    index 3 - Phase B low
+    index 4 - Phase C high
+    index 5 - Phase C low
+
+compatible: "remote-two,bldc-6pwm"
+
+properties:
+  pwms:
+    type: phandle-array
+    required: true
+    description: |
+      Six PWM specifiers in order AH, AL, BH, BL, CH, CL.
+      Each entry: <&pwm_controller channel period_ns flags>.
