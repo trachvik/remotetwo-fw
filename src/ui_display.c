@@ -393,36 +393,34 @@ static void render_status(void)
     }
     fb_puts(78, 13, buf);
 
-    /* ---- Row 2 (y=25): progress bar ---- */
-    fb_rect_outline(2, 25, 76, 11);
-    float prog = s->valid ? s->progress_pct : 0.0f;
-    int fill_w = (int)(74.0f * prog / 100.0f);
-    if (fill_w > 74) fill_w = 74;
-    for (int r = 26; r <= 34; r++) {
-        int bi = (r / 8) * DISP_W;
-        uint8_t bit = (uint8_t)(1 << (r % 8));
-        for (int c = 3; c < 3 + fill_w; c++) {
-            g_fb[bi + c] |= bit;
+    /* ---- Row 2 (y=25): progress bar — only when printing ---- */
+    if (s->valid && s->printing) {
+        fb_rect_outline(2, 25, 76, 11);
+        float prog = s->progress_pct;
+        int fill_w = (int)(74.0f * prog / 100.0f);
+        if (fill_w > 74) fill_w = 74;
+        for (int r = 26; r <= 34; r++) {
+            int bi = (r / 8) * DISP_W;
+            uint8_t bit = (uint8_t)(1 << (r % 8));
+            for (int c = 3; c < 3 + fill_w; c++) {
+                g_fb[bi + c] |= bit;
+            }
         }
-    }
-    if (s->valid) {
-        (void)snprintf(buf, sizeof(buf), "%3.0f%%", (double)s->progress_pct);
-    } else {
-        (void)strncpy(buf, "0%", sizeof(buf));
-    }
-    int tw = (int)strlen(buf) * 6;
-    int tx = 2 + (76 - tw) / 2;
-    fb_puts(tx, 27, buf);
-    if (fill_w > 0) {
-        fb_invert_rect(3, 26, fill_w, 9);
-    }
+        (void)snprintf(buf, sizeof(buf), "%3.0f%%", (double)prog);
+        int tw = (int)strlen(buf) * 6;
+        int tx = 2 + (76 - tw) / 2;
+        fb_puts(tx, 27, buf);
+        if (fill_w > 0) {
+            fb_invert_rect(3, 26, fill_w, 9);
+        }
 
-    /* Print time to the right of bar */
-    uint32_t ptime = s->valid ? s->print_secs : 0U;
-    uint32_t hh = ptime / 3600U;
-    uint32_t mm = (ptime % 3600U) / 60U;
-    (void)snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)hh, (unsigned)mm);
-    fb_puts(84, 27, buf);
+        /* Print time to the right of bar */
+        uint32_t ptime = s->print_secs;
+        uint32_t hh = ptime / 3600U;
+        uint32_t mm = (ptime % 3600U) / 60U;
+        (void)snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)hh, (unsigned)mm);
+        fb_puts(84, 27, buf);
+    }
 
     /* ---- Row 3 (y=39): status string ---- */
     const char *status_str;

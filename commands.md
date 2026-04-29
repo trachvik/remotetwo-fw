@@ -36,7 +36,7 @@ tp:e:210    //set extruder target temperature
 tp:b:60     //set bed target temperature
 ```
 
-### Tool select
+### Tool select (MMU)
 
 ```text
 t:0
@@ -65,6 +65,73 @@ offset:-0.05
 s:custom0
 s:custom1
 s:custom2
+```
+
+### Home
+
+```text
+home:all    //G28
+home:x      //G28 X
+home:y      //G28 Y
+home:z      //G28 Z
+```
+
+### Motors off
+
+```text
+motors:off  //M84
+```
+
+### Fan speed
+
+```text
+fan:<percent>   //0-100, mapped to M106 S0-255
+```
+
+### Cool down
+
+```text
+cool:down   //TURN_OFF_HEATERS
+```
+
+### Filament
+
+```text
+filament:preheat:pla
+filament:preheat:petg
+filament:load
+filament:unload
+```
+
+### Calibration
+
+```text
+calib:z
+calib:bed_mesh
+calib:first_layer
+calib:probe
+```
+
+### MMU
+
+```text
+mmu:home
+mmu:resume
+mmu:locate:<0-8>   //locate selector to tool slot
+```
+
+### Printing
+
+```text
+print:pause
+flow:<percent>    //M221 S<percent>
+speed:<percent>   //M220 S<percent>
+```
+
+### Fake position
+
+```text
+fake:position   //SET_KINEMATIC_POSITION X=150 Y=150 Z=10
 ```
 
 ## Input Commands (Raspberry Pi -> nRF5340)

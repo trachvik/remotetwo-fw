@@ -38,6 +38,9 @@ typedef enum {
     EDIT_TEMP_EXTRUDER,
     EDIT_TEMP_BED,
     EDIT_ZOFFSET,
+    EDIT_FAN,
+    EDIT_FLOW,
+    EDIT_SPEED,
 } edit_target_t;
 
 typedef struct {
@@ -62,15 +65,24 @@ static const param_desc_t g_params[] = {
     { EDIT_TEMP_EXTRUDER, "extruder", "tp:e",   "%.1f",     0.0f, 300.0f, 200.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
     { EDIT_TEMP_BED,      "bed",      "tp:b",   "%.1f",     0.0f, 120.0f,  60.0f, 0.1f, 1.0f,  5.0f, 10.0f  },
     { EDIT_ZOFFSET,       "z-offset", "offset", "%+.2f",   -5.0f,   5.0f,   0.0f, 0.01f, 0.01f, 0.05f, 0.1f  },
+    { EDIT_FAN,           "fan",      "fan",    "%.0f",    0.0f, 100.0f,   0.0f, 1.0f, 5.0f, 10.0f, 25.0f  },
+    { EDIT_FLOW,          "flow",     "flow",   "%.0f",   10.0f, 300.0f, 100.0f, 1.0f, 5.0f, 10.0f, 25.0f  },
+    { EDIT_SPEED,         "speed",    "speed",  "%.0f",   10.0f, 300.0f, 100.0f, 1.0f, 5.0f, 10.0f, 25.0f  },
 };
 
-static menu_level_t      g_level      = MENU_LEVEL_ROOT;
-static root_item_t       g_root_sel   = ROOT_STATUS_MENU;
-static position_item_t   g_pos_sel    = POS_X;
-static temperature_item_t g_temp_sel  = TEMP_EXTRUDER;
-static tool_item_t       g_tool_sel   = TOOL_T0;
-static macros_item_t     g_macros_sel = MACROS_SHEET;
-static sheet_item_t      g_sheet_sel  = SHEET_CUSTOM0;
+static menu_level_t      g_level         = MENU_LEVEL_ROOT;
+static root_item_t       g_root_sel      = ROOT_STATUS_MENU;
+static control_item_t    g_ctrl_sel      = CTRL_HOME_ALL;
+static control_axis_item_t g_ctrl_axis_sel = CTRL_AXIS_HOME;
+static int               g_ctrl_axis     = 0; /* 0=X, 1=Y, 2=Z */
+static temperature_item_t g_temp_sel     = TEMP_EXTRUDER;
+static filament_item_t   g_filament_sel  = FILAMENT_PREHEAT_PLA;
+static calibration_item_t g_calib_sel    = CALIB_Z;
+static mmu_item_t        g_mmu_sel       = MMU_HOME;
+static mmu_tool_item_t   g_mmu_tool_sel  = MMU_T0;
+static macros_item_t     g_macros_sel    = MACROS_SHEET;
+static sheet_item_t      g_sheet_sel     = SHEET_CUSTOM0;
+static printing_item_t   g_printing_sel  = PRINTING_PAUSE;
 static ui_mode_t         g_ui_mode    = UI_MODE_NAV;
 static edit_target_t     g_edit_target = EDIT_NONE;
 static float             g_edit_value  = 0.0f;
@@ -88,18 +100,24 @@ static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 
 #define DOUBLE_CLICK_WINDOW_MS  350
 #define SMOOTH_MENU_STEP_DIV    3
-#define DISPLAY_IDLE_TIMEOUT_MS 5000
+#define DISPLAY_IDLE_TIMEOUT_MS 20000
 
-/* --- 5-second inactivity timer: switch back to status screen --- */
+/* --- 20-second inactivity timer: switch back to status screen --- */
 static struct k_work_delayable g_idle_disp_work;
+
+/* True while the status screen is the active display. Cleared on first menu
+ * navigation so that a knob turn from the status screen always resets to root. */
+static bool g_is_status_mode = true;
 
 static inline void request_menu_refresh(void)
 {
+    g_is_status_mode = false;
     atomic_set(&g_menu_refresh_pending, 1);
 }
 
 static inline void request_status_mode(void)
 {
+    g_is_status_mode = true;
     atomic_set(&g_status_mode_pending, 1);
     /* Prevent a stale pending menu refresh from immediately switching back. */
     atomic_set(&g_menu_refresh_pending, 0);
@@ -153,39 +171,84 @@ static void display_push_menu(void)
     switch (g_level) {
     case MENU_LEVEL_ROOT:
         header = "Menu";
-        names[0] = "Position";
+        names[0] = "Control";
         names[1] = "Temperature";
-        names[2] = "Print tool";
-        names[3] = "Z-offset";
-        names[4] = "Macros";
-        count = ROOT_ITEM_COUNT - 1; /* skip ROOT_STATUS_MENU (index 0) */
-        /* Map g_root_sel (skipping 0) to display index */
+        names[2] = "Filament";
+        names[3] = "SD Card";
+        names[4] = "Calibration";
+        names[5] = "MMU";
+        names[6] = "Z-offset";
+        names[7] = "Macros";
+        names[8] = "Printing";
+        count = ROOT_ITEM_COUNT - 1; /* skip ROOT_STATUS_MENU */
         sel = (int)g_root_sel - 1;
         if (sel < 0) sel = 0;
         break;
-    case MENU_LEVEL_POSITION:
-        header = "Position";
-        names[0] = "X"; names[1] = "Y"; names[2] = "Z"; names[3] = "E";
-        count = POS_ITEM_COUNT;
-        sel   = (int)g_pos_sel;
+    case MENU_LEVEL_CONTROL:
+        header = "Control";
+        names[0] = "Home All";
+        names[1] = "X"; names[2] = "Y"; names[3] = "Z";
+        names[4] = "E";
+        names[5] = "Fan Speed";
+        names[6] = "Motors Off";
+        count = CTRL_ITEM_COUNT;
+        sel   = (int)g_ctrl_sel;
+        break;
+    case MENU_LEVEL_CONTROL_X:
+    case MENU_LEVEL_CONTROL_Y:
+    case MENU_LEVEL_CONTROL_Z:
+        header = (g_level == MENU_LEVEL_CONTROL_X) ? "X" :
+                 (g_level == MENU_LEVEL_CONTROL_Y) ? "Y" : "Z";
+        names[0] = "Home"; names[1] = "Move";
+        count = CTRL_AXIS_ITEM_COUNT;
+        sel   = (int)g_ctrl_axis_sel;
         break;
     case MENU_LEVEL_TEMPERATURE:
         header = "Temperature";
-        names[0] = "Extruder"; names[1] = "Bed";
+        names[0] = "Extruder"; names[1] = "Bed"; names[2] = "Cool Down";
         count = TEMP_ITEM_COUNT;
         sel   = (int)g_temp_sel;
         break;
-    case MENU_LEVEL_TOOL:
-        header = "Print Tool";
+    case MENU_LEVEL_FILAMENT:
+        header = "Filament";
+        names[0] = "Preheat PLA"; names[1] = "Preheat PETG";
+        names[2] = "Load"; names[3] = "Unload";
+        count = FILAMENT_ITEM_COUNT;
+        sel   = (int)g_filament_sel;
+        break;
+    case MENU_LEVEL_SD_CARD:
+        header = "SD Card";
+        names[0] = "(files)";
+        count = 1;
+        sel   = 0;
+        break;
+    case MENU_LEVEL_CALIBRATION:
+        header = "Calibration";
+        names[0] = "Calibrate Z"; names[1] = "Bed Mesh";
+        names[2] = "First Layer"; names[3] = "Probe Cal.";
+        count = CALIB_ITEM_COUNT;
+        sel   = (int)g_calib_sel;
+        break;
+    case MENU_LEVEL_MMU:
+        header = "MMU";
+        names[0] = "Home"; names[1] = "Resume";
+        names[2] = "Locate Sel."; names[3] = "Set Tool";
+        count = MMU_ITEM_COUNT;
+        sel   = (int)g_mmu_sel;
+        break;
+    case MENU_LEVEL_MMU_LOCATE:
+    case MENU_LEVEL_MMU_SET_TOOL:
+        header = (g_level == MENU_LEVEL_MMU_LOCATE) ? "Locate Sel." : "Set Tool";
         names[0]="T0"; names[1]="T1"; names[2]="T2"; names[3]="T3";
         names[4]="T4"; names[5]="T5"; names[6]="T6"; names[7]="T7"; names[8]="T8";
-        count = TOOL_ITEM_COUNT;
-        sel   = (int)g_tool_sel;
+        count = MMU_TOOL_ITEM_COUNT;
+        sel   = (int)g_mmu_tool_sel;
         break;
     case MENU_LEVEL_MACROS:
         header = "Macros";
-        names[0] = "Change sheet";
+        names[0] = "Change Sheet";
         names[1] = g_light_on ? "Light ON" : "Light OFF";
+        names[2] = "Fake Position";
         count = MACROS_ITEM_COUNT;
         sel   = (int)g_macros_sel;
         break;
@@ -194,6 +257,12 @@ static void display_push_menu(void)
         names[0] = "Custom 0"; names[1] = "Custom 1"; names[2] = "Custom 2";
         count = SHEET_ITEM_COUNT;
         sel   = (int)g_sheet_sel;
+        break;
+    case MENU_LEVEL_PRINTING:
+        header = "Printing";
+        names[0] = "Pause"; names[1] = "Flow"; names[2] = "Speed";
+        count = PRINTING_ITEM_COUNT;
+        sel   = (int)g_printing_sel;
         break;
     default:
         return;
@@ -293,13 +362,22 @@ static float current_edit_step(const param_desc_t *desc)
 static const char *level_name(menu_level_t level)
 {
     switch (level) {
-    case MENU_LEVEL_ROOT:        return "ROOT";
-    case MENU_LEVEL_POSITION:    return "POSITION";
-    case MENU_LEVEL_TEMPERATURE: return "TEMPERATURE";
-    case MENU_LEVEL_TOOL:        return "TOOL";
-    case MENU_LEVEL_MACROS:      return "MACROS";
-    case MENU_LEVEL_SHEET:       return "SHEET";
-    default:                     return "?";
+    case MENU_LEVEL_ROOT:         return "ROOT";
+    case MENU_LEVEL_CONTROL:      return "CONTROL";
+    case MENU_LEVEL_CONTROL_X:    return "CONTROL_X";
+    case MENU_LEVEL_CONTROL_Y:    return "CONTROL_Y";
+    case MENU_LEVEL_CONTROL_Z:    return "CONTROL_Z";
+    case MENU_LEVEL_TEMPERATURE:  return "TEMPERATURE";
+    case MENU_LEVEL_FILAMENT:     return "FILAMENT";
+    case MENU_LEVEL_SD_CARD:      return "SD_CARD";
+    case MENU_LEVEL_CALIBRATION:  return "CALIBRATION";
+    case MENU_LEVEL_MMU:          return "MMU";
+    case MENU_LEVEL_MMU_LOCATE:   return "MMU_LOCATE";
+    case MENU_LEVEL_MMU_SET_TOOL: return "MMU_SET_TOOL";
+    case MENU_LEVEL_MACROS:       return "MACROS";
+    case MENU_LEVEL_SHEET:        return "SHEET";
+    case MENU_LEVEL_PRINTING:     return "PRINTING";
+    default:                      return "?";
     }
 }
 
@@ -307,57 +385,36 @@ static const char *root_item_name(root_item_t item)
 {
     switch (item) {
     case ROOT_STATUS_MENU: return "status menu";
-    case ROOT_POSITION:    return "position";
+    case ROOT_CONTROL:     return "control";
     case ROOT_TEMPERATURE: return "temperature";
-    case ROOT_TOOL:        return "set print tool";
+    case ROOT_FILAMENT:    return "filament";
+    case ROOT_SD_CARD:     return "sd card";
+    case ROOT_CALIBRATION: return "calibration";
+    case ROOT_MMU:         return "mmu";
     case ROOT_ZOFFSET:     return "z-offset";
     case ROOT_MACROS:      return "macros";
+    case ROOT_PRINTING:    return "printing";
     default:               return "?";
-    }
-}
-
-static const char *position_item_name(position_item_t item)
-{
-    switch (item) {
-    case POS_X: return "X";
-    case POS_Y: return "Y";
-    case POS_Z: return "Z";
-    case POS_E: return "E";
-    default:       return "?";
-    }
-}
-
-static const char *temperature_item_name(temperature_item_t item)
-{
-    switch (item) {
-    case TEMP_EXTRUDER: return "extruder";
-    case TEMP_BED:      return "bed";
-    default:            return "?";
-    }
-}
-
-static const char *tool_item_name(tool_item_t item)
-{
-    switch (item) {
-    case TOOL_T0: return "T0";
-    case TOOL_T1: return "T1";
-    case TOOL_T2: return "T2";
-    case TOOL_T3: return "T3";
-    case TOOL_T4: return "T4";
-    case TOOL_T5: return "T5";
-    case TOOL_T6: return "T6";
-    case TOOL_T7: return "T7";
-    case TOOL_T8: return "T8";
-    default:        return "?";
     }
 }
 
 static const char *macros_item_name(macros_item_t item)
 {
     switch (item) {
-    case MACROS_SHEET: return "change print sheet";
-    case MACROS_LIGHT: return "printer light toggle";
-    default:           return "?";
+    case MACROS_SHEET:         return "change print sheet";
+    case MACROS_LIGHT:         return "printer light toggle";
+    case MACROS_FAKE_POSITION: return "fake position";
+    default:                   return "?";
+    }
+}
+
+static const char *temperature_item_name(temperature_item_t item)
+{
+    switch (item) {
+    case TEMP_EXTRUDER:  return "extruder";
+    case TEMP_BED:       return "bed";
+    case TEMP_COOL_DOWN: return "cool down";
+    default:             return "?";
     }
 }
 
@@ -381,13 +438,15 @@ static const char *current_selection_name(void)
         return (desc != NULL) ? desc->name : "edit";
     }
     switch (g_level) {
-    case MENU_LEVEL_ROOT:        return root_item_name(g_root_sel);
-    case MENU_LEVEL_POSITION:    return position_item_name(g_pos_sel);
-    case MENU_LEVEL_TEMPERATURE: return temperature_item_name(g_temp_sel);
-    case MENU_LEVEL_TOOL:        return tool_item_name(g_tool_sel);
-    case MENU_LEVEL_MACROS:      return macros_item_name(g_macros_sel);
-    case MENU_LEVEL_SHEET:       return sheet_item_name(g_sheet_sel);
-    default:                     return "?";
+    case MENU_LEVEL_ROOT:         return root_item_name(g_root_sel);
+    case MENU_LEVEL_CONTROL:
+    case MENU_LEVEL_CONTROL_X:
+    case MENU_LEVEL_CONTROL_Y:
+    case MENU_LEVEL_CONTROL_Z:    return level_name(g_level);
+    case MENU_LEVEL_TEMPERATURE:  return temperature_item_name(g_temp_sel);
+    case MENU_LEVEL_MACROS:       return macros_item_name(g_macros_sel);
+    case MENU_LEVEL_SHEET:        return sheet_item_name(g_sheet_sel);
+    default:                      return level_name(g_level);
     }
 }
 
@@ -491,10 +550,15 @@ static void confirm_edit_and_send(void)
     log_menu_state("exit edit");
 }
 
-static void send_tool(tool_item_t item)
+static void send_simple_gcode(const char *code)
+{
+    send_text_gcode(code);
+}
+
+static void send_tool(mmu_tool_item_t item)
 {
     char cmd[6];
-    (void)snprintf(cmd, sizeof(cmd), "t:%d", (int)item - (int)TOOL_T0);
+    (void)snprintf(cmd, sizeof(cmd), "t:%d", (int)item - (int)MMU_T0);
     send_text_gcode(cmd);
 }
 
@@ -587,6 +651,13 @@ static void on_knob_step(int dir)
         g_smooth_nav_accum = 0;
     }
 
+    /* When returning from the status screen, always start at the root menu
+     * so the user never lands in an unexpected submenu. */
+    if (g_is_status_mode) {
+        g_level    = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_CONTROL;
+    }
+
     switch (g_level) {
     case MENU_LEVEL_ROOT:
         {
@@ -597,20 +668,41 @@ static void on_knob_step(int dir)
             g_root_sel = (root_item_t)(idx + 1);
         }
         break;
-    case MENU_LEVEL_POSITION:
-        g_pos_sel = (position_item_t)wrap_step_int((int)g_pos_sel, POS_ITEM_COUNT, dir);
+    case MENU_LEVEL_CONTROL:
+        g_ctrl_sel = (control_item_t)wrap_step_int((int)g_ctrl_sel, CTRL_ITEM_COUNT, dir);
+        break;
+    case MENU_LEVEL_CONTROL_X:
+    case MENU_LEVEL_CONTROL_Y:
+    case MENU_LEVEL_CONTROL_Z:
+        g_ctrl_axis_sel = (control_axis_item_t)wrap_step_int((int)g_ctrl_axis_sel, CTRL_AXIS_ITEM_COUNT, dir);
         break;
     case MENU_LEVEL_TEMPERATURE:
         g_temp_sel = (temperature_item_t)wrap_step_int((int)g_temp_sel, TEMP_ITEM_COUNT, dir);
         break;
-    case MENU_LEVEL_TOOL:
-        g_tool_sel = (tool_item_t)wrap_step_int((int)g_tool_sel, TOOL_ITEM_COUNT, dir);
+    case MENU_LEVEL_FILAMENT:
+        g_filament_sel = (filament_item_t)wrap_step_int((int)g_filament_sel, FILAMENT_ITEM_COUNT, dir);
+        break;
+    case MENU_LEVEL_SD_CARD:
+        /* SD card file list — not yet implemented, no navigation */
+        break;
+    case MENU_LEVEL_CALIBRATION:
+        g_calib_sel = (calibration_item_t)wrap_step_int((int)g_calib_sel, CALIB_ITEM_COUNT, dir);
+        break;
+    case MENU_LEVEL_MMU:
+        g_mmu_sel = (mmu_item_t)wrap_step_int((int)g_mmu_sel, MMU_ITEM_COUNT, dir);
+        break;
+    case MENU_LEVEL_MMU_LOCATE:
+    case MENU_LEVEL_MMU_SET_TOOL:
+        g_mmu_tool_sel = (mmu_tool_item_t)wrap_step_int((int)g_mmu_tool_sel, MMU_TOOL_ITEM_COUNT, dir);
         break;
     case MENU_LEVEL_MACROS:
         g_macros_sel = (macros_item_t)wrap_step_int((int)g_macros_sel, MACROS_ITEM_COUNT, dir);
         break;
     case MENU_LEVEL_SHEET:
         g_sheet_sel = (sheet_item_t)wrap_step_int((int)g_sheet_sel, SHEET_ITEM_COUNT, dir);
+        break;
+    case MENU_LEVEL_PRINTING:
+        g_printing_sel = (printing_item_t)wrap_step_int((int)g_printing_sel, PRINTING_ITEM_COUNT, dir);
         break;
     }
 
@@ -641,9 +733,9 @@ static void on_confirm_action(void)
         case ROOT_STATUS_MENU:
             log_menu_state("confirm status");
             return;
-        case ROOT_POSITION:
-            g_level = MENU_LEVEL_POSITION;
-            g_pos_sel = POS_X;
+        case ROOT_CONTROL:
+            g_level = MENU_LEVEL_CONTROL;
+            g_ctrl_sel = CTRL_HOME_ALL;
             log_menu_state("enter submenu");
             return;
         case ROOT_TEMPERATURE:
@@ -651,9 +743,23 @@ static void on_confirm_action(void)
             g_temp_sel = TEMP_EXTRUDER;
             log_menu_state("enter submenu");
             return;
-        case ROOT_TOOL:
-            g_level = MENU_LEVEL_TOOL;
-            g_tool_sel = TOOL_T0;
+        case ROOT_FILAMENT:
+            g_level = MENU_LEVEL_FILAMENT;
+            g_filament_sel = FILAMENT_PREHEAT_PLA;
+            log_menu_state("enter submenu");
+            return;
+        case ROOT_SD_CARD:
+            g_level = MENU_LEVEL_SD_CARD;
+            log_menu_state("enter submenu");
+            return;
+        case ROOT_CALIBRATION:
+            g_level = MENU_LEVEL_CALIBRATION;
+            g_calib_sel = CALIB_Z;
+            log_menu_state("enter submenu");
+            return;
+        case ROOT_MMU:
+            g_level = MENU_LEVEL_MMU;
+            g_mmu_sel = MMU_HOME;
             log_menu_state("enter submenu");
             return;
         case ROOT_ZOFFSET:
@@ -664,34 +770,134 @@ static void on_confirm_action(void)
             g_macros_sel = MACROS_SHEET;
             log_menu_state("enter submenu");
             return;
+        case ROOT_PRINTING:
+            g_level = MENU_LEVEL_PRINTING;
+            g_printing_sel = PRINTING_PAUSE;
+            log_menu_state("enter submenu");
+            return;
         default:
             return;
         }
     }
 
-    if (g_level == MENU_LEVEL_POSITION) {
-        switch (g_pos_sel) {
-        case POS_X: enter_edit_mode(EDIT_POS_X); return;
-        case POS_Y: enter_edit_mode(EDIT_POS_Y); return;
-        case POS_Z: enter_edit_mode(EDIT_POS_Z); return;
-        case POS_E: enter_edit_mode(EDIT_POS_E); return;
-        default: return;
+    if (g_level == MENU_LEVEL_CONTROL) {
+        switch (g_ctrl_sel) {
+        case CTRL_HOME_ALL:
+            send_simple_gcode("home:all");
+            log_menu_state("home all");
+            return;
+        case CTRL_X:
+            g_level = MENU_LEVEL_CONTROL_X;
+            g_ctrl_axis = 0;
+            g_ctrl_axis_sel = CTRL_AXIS_HOME;
+            log_menu_state("enter submenu");
+            return;
+        case CTRL_Y:
+            g_level = MENU_LEVEL_CONTROL_Y;
+            g_ctrl_axis = 1;
+            g_ctrl_axis_sel = CTRL_AXIS_HOME;
+            log_menu_state("enter submenu");
+            return;
+        case CTRL_Z:
+            g_level = MENU_LEVEL_CONTROL_Z;
+            g_ctrl_axis = 2;
+            g_ctrl_axis_sel = CTRL_AXIS_HOME;
+            log_menu_state("enter submenu");
+            return;
+        case CTRL_E:
+            enter_edit_mode(EDIT_POS_E);
+            return;
+        case CTRL_FAN:
+            enter_edit_mode(EDIT_FAN);
+            return;
+        case CTRL_MOTORS_OFF:
+            send_simple_gcode("motors:off");
+            log_menu_state("motors off");
+            return;
+        default:
+            return;
+        }
+    }
+
+    if (g_level == MENU_LEVEL_CONTROL_X ||
+        g_level == MENU_LEVEL_CONTROL_Y ||
+        g_level == MENU_LEVEL_CONTROL_Z) {
+        static const char * const home_cmds[] = {"home:x", "home:y", "home:z"};
+        static const edit_target_t move_targets[] = {EDIT_POS_X, EDIT_POS_Y, EDIT_POS_Z};
+        int ax = g_ctrl_axis;
+        switch (g_ctrl_axis_sel) {
+        case CTRL_AXIS_HOME:
+            send_simple_gcode(home_cmds[ax]);
+            log_menu_state("axis home");
+            return;
+        case CTRL_AXIS_MOVE:
+            enter_edit_mode(move_targets[ax]);
+            return;
+        default:
+            return;
         }
     }
 
     if (g_level == MENU_LEVEL_TEMPERATURE) {
         switch (g_temp_sel) {
-        case TEMP_EXTRUDER: enter_edit_mode(EDIT_TEMP_EXTRUDER); return;
-        case TEMP_BED:      enter_edit_mode(EDIT_TEMP_BED);      return;
+        case TEMP_EXTRUDER:  enter_edit_mode(EDIT_TEMP_EXTRUDER); return;
+        case TEMP_BED:       enter_edit_mode(EDIT_TEMP_BED);      return;
+        case TEMP_COOL_DOWN: send_simple_gcode("cool:down"); log_menu_state("cool down"); return;
         default: return;
         }
     }
 
-    if (g_level == MENU_LEVEL_TOOL) {
-        send_tool(g_tool_sel);
-        g_level = MENU_LEVEL_ROOT;
-        g_root_sel = ROOT_TOOL;
-        log_menu_state("tool selected");
+    if (g_level == MENU_LEVEL_FILAMENT) {
+        switch (g_filament_sel) {
+        case FILAMENT_PREHEAT_PLA:  send_simple_gcode("filament:preheat:pla");  log_menu_state("preheat pla");  return;
+        case FILAMENT_PREHEAT_PETG: send_simple_gcode("filament:preheat:petg"); log_menu_state("preheat petg"); return;
+        case FILAMENT_LOAD:         send_simple_gcode("filament:load");         log_menu_state("load");         return;
+        case FILAMENT_UNLOAD:       send_simple_gcode("filament:unload");       log_menu_state("unload");       return;
+        default: return;
+        }
+    }
+
+    if (g_level == MENU_LEVEL_CALIBRATION) {
+        switch (g_calib_sel) {
+        case CALIB_Z:           send_simple_gcode("calib:z");           log_menu_state("calib z");           return;
+        case CALIB_BED_MESH:    send_simple_gcode("calib:bed_mesh");    log_menu_state("calib bed mesh");    return;
+        case CALIB_FIRST_LAYER: send_simple_gcode("calib:first_layer"); log_menu_state("calib first layer"); return;
+        case CALIB_PROBE:       send_simple_gcode("calib:probe");       log_menu_state("calib probe");       return;
+        default: return;
+        }
+    }
+
+    if (g_level == MENU_LEVEL_MMU) {
+        switch (g_mmu_sel) {
+        case MMU_HOME:    send_simple_gcode("mmu:home");   log_menu_state("mmu home");   return;
+        case MMU_RESUME:  send_simple_gcode("mmu:resume"); log_menu_state("mmu resume"); return;
+        case MMU_LOCATE_SELECTOR:
+            g_level = MENU_LEVEL_MMU_LOCATE;
+            g_mmu_tool_sel = MMU_T0;
+            log_menu_state("enter submenu");
+            return;
+        case MMU_SET_TOOL:
+            g_level = MENU_LEVEL_MMU_SET_TOOL;
+            g_mmu_tool_sel = MMU_T0;
+            log_menu_state("enter submenu");
+            return;
+        default: return;
+        }
+    }
+
+    if (g_level == MENU_LEVEL_MMU_LOCATE) {
+        char cmd[16];
+        (void)snprintf(cmd, sizeof(cmd), "mmu:locate:%d", (int)g_mmu_tool_sel);
+        send_text_gcode(cmd);
+        g_level = MENU_LEVEL_MMU;
+        log_menu_state("mmu locate selected");
+        return;
+    }
+
+    if (g_level == MENU_LEVEL_MMU_SET_TOOL) {
+        send_tool(g_mmu_tool_sel);
+        g_level = MENU_LEVEL_MMU;
+        log_menu_state("mmu tool selected");
         return;
     }
 
@@ -706,6 +912,10 @@ static void on_confirm_action(void)
             toggle_light();
             log_menu_state("light toggled");
             return;
+        case MACROS_FAKE_POSITION:
+            send_simple_gcode("fake:position");
+            log_menu_state("fake position");
+            return;
         default: return;
         }
     }
@@ -716,6 +926,15 @@ static void on_confirm_action(void)
         g_macros_sel = MACROS_SHEET;
         log_menu_state("sheet selected");
         return;
+    }
+
+    if (g_level == MENU_LEVEL_PRINTING) {
+        switch (g_printing_sel) {
+        case PRINTING_PAUSE: send_simple_gcode("print:pause"); log_menu_state("print pause"); return;
+        case PRINTING_FLOW:  enter_edit_mode(EDIT_FLOW);  return;
+        case PRINTING_SPEED: enter_edit_mode(EDIT_SPEED); return;
+        default: return;
+        }
     }
 }
 
@@ -738,14 +957,28 @@ static void on_back_action(void)
 
     switch (g_level) {
     case MENU_LEVEL_ROOT:
-        /* Back at root level → return to status screen */
         LOG_INF("MENU back (root) | mode=NAV | level=ROOT");
         k_work_cancel_delayable(&g_idle_disp_work);
         request_status_mode();
         return;
-    case MENU_LEVEL_POSITION:
+    case MENU_LEVEL_CONTROL:
         g_level = MENU_LEVEL_ROOT;
-        g_root_sel = ROOT_POSITION;
+        g_root_sel = ROOT_CONTROL;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_CONTROL_X:
+        g_level = MENU_LEVEL_CONTROL;
+        g_ctrl_sel = CTRL_X;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_CONTROL_Y:
+        g_level = MENU_LEVEL_CONTROL;
+        g_ctrl_sel = CTRL_Y;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_CONTROL_Z:
+        g_level = MENU_LEVEL_CONTROL;
+        g_ctrl_sel = CTRL_Z;
         log_menu_state("back");
         return;
     case MENU_LEVEL_TEMPERATURE:
@@ -753,9 +986,34 @@ static void on_back_action(void)
         g_root_sel = ROOT_TEMPERATURE;
         log_menu_state("back");
         return;
-    case MENU_LEVEL_TOOL:
+    case MENU_LEVEL_FILAMENT:
         g_level = MENU_LEVEL_ROOT;
-        g_root_sel = ROOT_TOOL;
+        g_root_sel = ROOT_FILAMENT;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_SD_CARD:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_SD_CARD;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_CALIBRATION:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_CALIBRATION;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_MMU:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_MMU;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_MMU_LOCATE:
+        g_level = MENU_LEVEL_MMU;
+        g_mmu_sel = MMU_LOCATE_SELECTOR;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_MMU_SET_TOOL:
+        g_level = MENU_LEVEL_MMU;
+        g_mmu_sel = MMU_SET_TOOL;
         log_menu_state("back");
         return;
     case MENU_LEVEL_MACROS:
@@ -766,6 +1024,11 @@ static void on_back_action(void)
     case MENU_LEVEL_SHEET:
         g_level = MENU_LEVEL_MACROS;
         g_macros_sel = MACROS_SHEET;
+        log_menu_state("back");
+        return;
+    case MENU_LEVEL_PRINTING:
+        g_level = MENU_LEVEL_ROOT;
+        g_root_sel = ROOT_PRINTING;
         log_menu_state("back");
         return;
     default:
@@ -826,13 +1089,19 @@ void remote_control_init(void)
         LOG_ERR("BLE init failed (%d)", err);
     }
 
-    g_level       = MENU_LEVEL_ROOT;
-    g_root_sel    = ROOT_POSITION;
-    g_pos_sel     = POS_X;
-    g_temp_sel    = TEMP_EXTRUDER;
-    g_tool_sel    = TOOL_T0;
-    g_macros_sel  = MACROS_SHEET;
-    g_sheet_sel   = SHEET_CUSTOM0;
+    g_level          = MENU_LEVEL_ROOT;
+    g_root_sel       = ROOT_CONTROL;
+    g_ctrl_sel       = CTRL_HOME_ALL;
+    g_ctrl_axis_sel  = CTRL_AXIS_HOME;
+    g_ctrl_axis      = 0;
+    g_temp_sel       = TEMP_EXTRUDER;
+    g_filament_sel   = FILAMENT_PREHEAT_PLA;
+    g_calib_sel      = CALIB_Z;
+    g_mmu_sel        = MMU_HOME;
+    g_mmu_tool_sel   = MMU_T0;
+    g_macros_sel     = MACROS_SHEET;
+    g_sheet_sel      = SHEET_CUSTOM0;
+    g_printing_sel   = PRINTING_PAUSE;
     g_ui_mode     = UI_MODE_NAV;
     g_edit_target = EDIT_NONE;
     g_light_on    = false;

@@ -1,34 +1,69 @@
 - status menu
-- position
-    - back
+- control
+    - home all
     - X
+        - home
+        - move
     - Y
+        - home
+        - move
     - Z
+        - home
+        - move
     - E
+    - fan speed
+    - motors off
 - temperature
-    - back
     - extruder
     - bed
-- set print tool
-    - back
-    - t0
-    - t1
-    - t2
-    - t3
-    - t4
-    - t5
-    - t6
-    - t7
-    - t8
+    - cool down
+- filament
+    - preheat PLA
+    - preheat PETG
+    - load filament
+    - unload filament
+- SD card
+    - *files*
+- Calibration
+    - calibrate z
+    - bed mesh
+    - first layer
+    - probe calibration
+- MMU
+    - home
+    - resume
+    - locate selector
+        - t0
+        - t1
+        - t2
+        - t3
+        - t4
+        - t5
+        - t6
+        - t7
+        - t8
+    - set print tool
+        - t0
+        - t1
+        - t2
+        - t3
+        - t4
+        - t5
+        - t6
+        - t7
+        - t8
 - z-offset
 - macros
-    - back
     - change print sheet
-        - back
         - custom0
         - custom1
         - custom2
     - Printer light toggle
+    - fake position
+- printing
+    - pause
+    - flow
+    - speed
 
 
     
