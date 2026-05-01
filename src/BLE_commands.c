@@ -21,6 +21,9 @@ LOG_MODULE_REGISTER(ble_commands, LOG_LEVEL_DBG);
 #define BLE_TX_STACK_SIZE   1024
 #define BLE_TX_THREAD_PRIO    7
 
+/* Receive reassembly buffer — accumulates incoming BLE chunks until \n. */
+#define NUS_RX_BUF_SIZE     256
+
 struct ble_tx_msg {
     uint8_t len;
     char payload[BLE_MSG_MAX_LEN];
@@ -35,6 +38,9 @@ static bool g_ble_connected;
 static struct bt_conn *g_current_conn;
 static bool g_nus_notif_enabled;
 static uint16_t g_tx_cmd_id;
+
+static char   g_nus_rx_buf[NUS_RX_BUF_SIZE];
+static size_t g_nus_rx_len;
 
 static struct ble_printer_state g_state;
 static struct ble_last_ack g_last_ack;
@@ -251,6 +257,15 @@ static void parse_state_message(char *msg)
             g_state.printing = parsed;
             k_mutex_unlock(&g_proto_lock);
         }
+    } else if (strcmp(subtype, "fan") == 0) {
+        char *val = strtok_r(NULL, ":", &saveptr);
+        float parsed = 0.0f;
+        if (str_to_float(val, &parsed)) {
+            k_mutex_lock(&g_proto_lock, K_FOREVER);
+            g_state.valid = true;
+            g_state.fan_pct = parsed;
+            k_mutex_unlock(&g_proto_lock);
+        }
     } else if (strcmp(subtype, "tool") == 0) {
         char *val = strtok_r(NULL, ":", &saveptr);
         if (val != NULL) {
@@ -270,28 +285,46 @@ static void nus_notif_enabled(bool enabled, void *ctx)
     LOG_INF("NUS TX notifications %s", enabled ? "enabled" : "disabled");
 }
 
+static void nus_process_line(char *line)
+{
+    LOG_INF("NUS RX: %s", line);
+
+    if (strncmp(line, "ack:", 4) == 0) {
+        parse_ack_message(line);
+        return;
+    }
+    if (strncmp(line, "state:", 6) == 0 || strncmp(line, "status:", 7) == 0) {
+        parse_state_message(line);
+        return;
+    }
+}
+
 static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, void *ctx)
 {
     ARG_UNUSED(conn);
     ARG_UNUSED(ctx);
 
-    char tmp[BLE_MSG_MAX_LEN];
-    size_t copy_len = len;
-    if (copy_len >= sizeof(tmp)) {
-        copy_len = sizeof(tmp) - 1;
-    }
-    memcpy(tmp, data, copy_len);
-    tmp[copy_len] = '\0';
+    const uint8_t *bytes = (const uint8_t *)data;
 
-    LOG_INF("NUS RX: %s", tmp);
+    for (uint16_t i = 0; i < len; i++) {
+        char c = (char)bytes[i];
 
-    if (strncmp(tmp, "ack:", 4) == 0) {
-        parse_ack_message(tmp);
-        return;
-    }
-    if (strncmp(tmp, "state:", 6) == 0 || strncmp(tmp, "status:", 7) == 0) {
-        parse_state_message(tmp);
-        return;
+        if (c == '\n' || c == '\r') {
+            if (g_nus_rx_len > 0) {
+                g_nus_rx_buf[g_nus_rx_len] = '\0';
+                nus_process_line(g_nus_rx_buf);
+                g_nus_rx_len = 0;
+            }
+            continue;
+        }
+
+        if (g_nus_rx_len >= NUS_RX_BUF_SIZE - 1U) {
+            LOG_WRN("NUS RX line overflow, resetting");
+            g_nus_rx_len = 0;
+            continue;
+        }
+
+        g_nus_rx_buf[g_nus_rx_len++] = c;
     }
 }
 
@@ -326,6 +359,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
     g_ble_connected = false;
     g_nus_notif_enabled = false;
+    g_nus_rx_len = 0;   /* discard any partial line from previous session */
     LOG_INF("BLE disconnected (reason 0x%02x)", reason);
 }
 
