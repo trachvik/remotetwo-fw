@@ -1,5 +1,5 @@
 #include "bldc_motor.h"
-#include "bldc_driver_6pwm.h"
+#include "bldc_driver_3pwm.h"
 #include <string.h>
 #include <math.h>
 #include <arm_math.h>
@@ -56,40 +56,40 @@ extern bool sensor_needs_search(sensor_t *sensor);
 void driver_set_pwm(bldc_driver_t *driver, float ua, float ub, float uc)
 {
     if (driver == NULL) return;
-    
-    bldc_driver_6pwm_t *drv = (bldc_driver_6pwm_t*)driver;
-    bldc_driver_6pwm_set_pwm(drv, ua, ub, uc);
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)driver;
+    bldc_driver_3pwm_set_pwm(drv, ua, ub, uc);
 }
 
 void driver_enable(bldc_driver_t *driver)
 {
     if (driver == NULL) return;
-    
-    bldc_driver_6pwm_t *drv = (bldc_driver_6pwm_t*)driver;
-    bldc_driver_6pwm_enable(drv);
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)driver;
+    bldc_driver_3pwm_enable(drv);
 }
 
 void driver_disable(bldc_driver_t *driver)
 {
     if (driver == NULL) return;
-    
-    bldc_driver_6pwm_t *drv = (bldc_driver_6pwm_t*)driver;
-    bldc_driver_6pwm_disable(drv);
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)driver;
+    bldc_driver_3pwm_disable(drv);
 }
 
 bool driver_is_initialized(bldc_driver_t *driver)
 {
     if (driver == NULL) return false;
-    
-    bldc_driver_6pwm_t *drv = (bldc_driver_6pwm_t*)driver;
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)driver;
     return drv->initialized;
 }
 
 float driver_get_voltage_limit(bldc_driver_t *driver)
 {
     if (driver == NULL) return 0.0f;
-    
-    bldc_driver_6pwm_t *drv = (bldc_driver_6pwm_t*)driver;
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)driver;
     return drv->voltage_limit;
 }
 

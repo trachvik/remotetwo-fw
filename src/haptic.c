@@ -43,15 +43,7 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define DETENT_IIR_ALPHA    0.30f   /* ¤äÔëł2.8 ms at 1 kHz ÔÇö filters encoder-LSB 1 kHz noise
                                      * while keeping detent snap feel intact */
 
-/* PWM pin definitions for 6PWM BLDC driver */
-/* TODO: Update these pin numbers based on your actual hardware */
-#define PWM_AH_PIN  0   /* Phase A high-side */
-#define PWM_AL_PIN  1   /* Phase A low-side */
-#define PWM_BH_PIN  2   /* Phase B high-side */
-#define PWM_BL_PIN  3   /* Phase B low-side */
-#define PWM_CH_PIN  4   /* Phase C high-side */
-#define PWM_CL_PIN  5   /* Phase C low-side */
-#define ENABLE_PIN  NOT_SET  /* Optional enable pin */
+/* PWM pin definitions removed – hardware fully described in board overlay */
 
 /* Motor parameters */
 #define MOTOR_POLE_PAIRS 11     /* Number of pole pairs */
@@ -193,7 +185,7 @@ int haptic_update_num_steps_from_button(void)
 
 int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 {
-    bldc_driver_6pwm_t *driver_6pwm = (bldc_driver_6pwm_t *)driver;
+    bldc_driver_3pwm_t *driver_3pwm = (bldc_driver_3pwm_t *)driver;
     struct as5048a_device *as5048a = (struct as5048a_device *)encoder;
 
     /* Initialize AS5048A encoder */
@@ -205,21 +197,16 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     }
     LOG_INF("   [OK] AS5048A ready");
 
-    /* Initialize BLDC 6PWM Driver */
-    LOG_INF("2. Initializing 6PWM driver...");
-    bldc_driver_6pwm_init_struct(driver_6pwm,
-                                 PWM_AH_PIN, PWM_AL_PIN,
-                                 PWM_BH_PIN, PWM_BL_PIN,
-                                 PWM_CH_PIN, PWM_CL_PIN,
-                                 ENABLE_PIN);
+    /* Initialize DRV8311H 3PWM Driver */
+    LOG_INF("2. Initializing DRV8311H 3PWM driver...");
+    bldc_driver_3pwm_init_struct(driver_3pwm);
 
     /* Configure driver parameters */
-    driver_6pwm->pwm_frequency = 25000;  /* 25 kHz PWM */
-    driver_6pwm->voltage_power_supply = SUPPLY_VOLTAGE;
-    driver_6pwm->voltage_limit = HAPTIC_VOLTAGE_LIMIT;
-    driver_6pwm->dead_zone = 0.02f;  /* 2% dead time */
+    driver_3pwm->pwm_frequency        = 25000;
+    driver_3pwm->voltage_power_supply = SUPPLY_VOLTAGE;
+    driver_3pwm->voltage_limit        = HAPTIC_VOLTAGE_LIMIT;
 
-    if (bldc_driver_6pwm_init_hw(driver_6pwm) != DRIVER_INIT_OK)
+    if (bldc_driver_3pwm_init_hw(driver_3pwm) != DRIVER_INIT_OK)
     {
         LOG_ERR("   Failed to initialize driver");
         //return -1;
@@ -396,8 +383,8 @@ void haptic_loop(bldc_motor_t *motor)
                 (num_steps == 0) ? "smooth" : "detent", num_steps);
     }
 
-    bldc_driver_6pwm_set_phase_state((bldc_driver_6pwm_t *)motor->driver,
-                                     PHASE_ON, PHASE_ON, PHASE_ON);
+    /* 3PWM: no phase-state management needed – just ensure duty cycles are live */
+    (void)motor->driver;  /* driver accessed through bldc_motor_set_phase_voltage */
 
     float target_voltage;
 

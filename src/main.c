@@ -9,7 +9,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 /* Device instances */
 static struct as5048a_device encoder;
-static bldc_driver_6pwm_t driver;
+static bldc_driver_3pwm_t driver;
 static bldc_motor_t motor;
 
 /* Global pointer for sensor wrapper */

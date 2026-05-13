@@ -69,18 +69,6 @@
 		};
 	};
 
-	/* ---- PWM1: INL (common low-side) ---- */
-	pwm1_default: pwm1_default {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 18)>;  /* INL – P0.18 */
-		};
-	};
-	pwm1_sleep: pwm1_sleep {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 18)>;
-			low-power-enable;
-		};
-	};
 };
 
 /* ================================================================
@@ -148,16 +136,6 @@
 	status = "okay";
 	pinctrl-0 = <&pwm0_default>;
 	pinctrl-1 = <&pwm0_sleep>;
-	pinctrl-names = "default", "sleep";
-};
-
-/* ================================================================
- * PWM1 – DRV8311 common low-side INL
- * ================================================================ */
-&pwm1 {
-	status = "okay";
-	pinctrl-0 = <&pwm1_default>;
-	pinctrl-1 = <&pwm1_sleep>;
 	pinctrl-names = "default", "sleep";
 };
 
@@ -238,17 +216,19 @@
 	};
 
 	/* ------------------------------------------------------------
-	 * DRV8311 motor driver
-	 *   PWM channels: INA (OUT0), INB (OUT1), INC (OUT2), INL (OUT0/PWM1)
+	 * DRV8311H motor driver – 3PWM mode
+	 *   INA/INB/INC driven by PWM0 channels 0/1/2.
+	 *   INL (low-side enable) and nSLEEP driven as plain GPIO outputs.
+	 *   nFAULT is a GPIO input with falling-edge interrupt for logging.
 	 * ------------------------------------------------------------ */
 	bldc_drv: bldc_drv {
 		compatible = "remote-two,bldc-drv8311";
 		pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,  /* INA – P0.07 */
 		       <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,  /* INB – P1.05 */
-		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>,  /* INC – P0.22 */
-		       <&pwm1 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>;  /* INL – P0.18 */
-		fault-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;          /* DRV_FAULT   – P0.11 */
-		sleep-gpios = <&gpio1  1 GPIO_ACTIVE_HIGH>;         /* DRV_SLEEP   – P1.01 */
+		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>;  /* INC – P0.22 */
+		inl-gpios   = <&gpio0 18 GPIO_ACTIVE_HIGH>;         /* INL        – P0.18 */
+		fault-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;          /* DRV_FAULT  – P0.11 */
+		sleep-gpios = <&gpio1  1 GPIO_ACTIVE_HIGH>;         /* DRV_SLEEP  – P1.01 */
 	};
 
 	/* ------------------------------------------------------------
