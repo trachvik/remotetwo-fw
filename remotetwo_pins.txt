@@ -1,0 +1,99 @@
+# RemoteTwo – nRF5340 (MDBT53) Pin Definitions
+# Source: nRF5340_altium_schema.pdf
+#
+# Format: GPIO / Module-pad | Signal name | Module pin# | Notes
+# X = not connected (NC) on schematic
+
+# ============================================================
+# DEBUG / PROGRAMMING
+# ============================================================
+SWDCLK          SWDCLK          pin 2
+SWDIO           SWDIO           pin 4
+RESET           RSTIO           pin 6
+
+# ============================================================
+# BUTTONS
+# ============================================================
+P1.06           B1              pin 10
+P0.21           B2              pin 12
+P1.08           B3              pin 3
+P0.20           B4              pin 13
+P0.12           B5              pin 15   # also HSPI_DCX
+P1.12           B6              pin 53
+P0.19           B7              pin 14
+P1.04           B8              pin 11
+
+# ============================================================
+# VOLTAGE SELECTORS (display / LED power rail)
+# ============================================================
+P0.23           VSEL1           pin 62
+P1.07           VSEL2           pin 63
+P0.29           VSEL3           pin 65
+P1.09           VSEL4           pin 64
+
+# ============================================================
+# SPI BUS (shared – motor driver + OLED)
+# ============================================================
+P0.09           SPI_MOSI        pin 19   # HSPI_MOSI
+P0.10           SPI_MISO        pin 18   # HSPI_MISO
+P0.08           SPI_SCK         pin 23   # HSPI_SCK
+P0.18           INL             pin 16   # QSPI_CSN – motor driver CS / INL
+
+# ============================================================
+# OLED DISPLAY
+# ============================================================
+P1.13           D/C             pin 51   # OLED Data / Command
+P1.14           OLED_RST        pin 49   # OLED Reset
+P0.02           CSn_OLED        pin 32   # AIN2 – OLED chip select
+
+# ============================================================
+# MOTOR DRIVER (DRV8311)
+# ============================================================
+P0.07           INA             pin 20   # AIN3 – motor input A
+P0.22           INC             pin 26   # QSPI_OSPI1 – motor input C
+P1.05           INB             pin 22   # motor input B  (X = NC in schematic)
+P0.11           DRV_FAULT       pin 17   # HSPI_CSN – driver fault / CS
+P1.01           DRV_SLEEP       pin 43   # motor driver sleep
+
+# ============================================================
+# CAPACITIVE / ROTARY ENCODER SENSORS
+# ============================================================
+P0.27           SOA             pin 5    # AIN6 – sensor output A
+P0.26           SOB             pin 7    # AIN5 – sensor output B
+P0.25           SOC             pin 9    # AIN4 – sensor output C
+
+# ============================================================
+# TMAG5273 (magnetic angle sensor, SPI)
+# ============================================================
+P1.15           CS_TMAG         pin 47   # chip select
+P1.00           ALRT_TMAG       pin 45   # alert / interrupt
+
+# ============================================================
+# CHARGER / POWER MANAGEMENT (MIC2288 boost + charger IC)
+# ============================================================
+P0.28           MIC2288_MOS     pin 60   # AIN7 – boost converter gate
+P1.10           CHARGE_STAT     pin 59   # charger status
+P0.30           CTRL            pin 57   # power control
+P0.31           ALRT            pin 56   # alert
+P1.11           IRQn            pin 55   # interrupt from charger / fuel gauge
+
+# ============================================================
+# USB
+# ============================================================
+D-              USB_N           pin 48
+D+              USB_P           pin 46
+VBUS                            pin 44   # power rail, no GPIO
+P0.06           CC1
+P0.04           CC2
+
+# ============================================================
+# I2C
+# ============================================================
+P1.02           SDA             pin 33   # NFC1 / TWI0 – I2C data
+P1.03           SCL             pin 31
+
+# ============================================================
+# Accelerometer
+# ============================================================
+P0.05           INT_ACCEL       pin 39   # accelerometer interrupt 
+

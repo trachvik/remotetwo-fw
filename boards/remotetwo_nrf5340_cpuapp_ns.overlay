@@ -1,0 +1,302 @@
+/*
+ * Device Tree overlay – RemoteTwo hardware (nRF5340 / MDBT53)
+ * Derived from nRF5340_altium_schema.pdf / remotetwo_pins.txt
+ *
+ * LFXO  – 32.768 kHz crystal ABS07-32.768KHZ-9-T
+ *   internal load capacitors set to 9 pF (= 9000 fF)
+ *
+ * SPI0  – TMAG5273 magnetic angle sensor  (CS: P1.15)
+ *       + SSD1309 OLED display            (CS: P0.02)
+ *   SCK  → P0.08   MOSI → P0.09   MISO → P0.10
+ *
+ * I2C1  – on-board I2C bus (accelerometer, …)
+ *   SDA  → P1.02   SCL  → P1.03
+ *
+ * PWM0  – DRV8311 motor inputs INA / INB / INC
+ *   INA → P0.07   INB → P1.05   INC → P0.22
+ *
+ * PWM1  – DRV8311 common low-side INL
+ *   INL → P0.18
+ */
+
+&pinctrl {
+	/* ---- SPI0: TMAG5273 + SSD1309 OLED ---- */
+	spi0_default: spi0_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+		};
+	};
+	spi0_sleep: spi0_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+			low-power-enable;
+		};
+	};
+
+	/* ---- I2C1 ---- */
+	i2c1_default: i2c1_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 2)>,
+				<NRF_PSEL(TWIM_SCL, 1, 3)>;
+		};
+	};
+	i2c1_sleep: i2c1_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 2)>,
+				<NRF_PSEL(TWIM_SCL, 1, 3)>;
+			low-power-enable;
+		};
+	};
+
+	/* ---- PWM0: INA / INB / INC ---- */
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 7)>,   /* INA – P0.07 */
+				<NRF_PSEL(PWM_OUT1, 1, 5)>,    /* INB – P1.05 */
+				<NRF_PSEL(PWM_OUT2, 0, 22)>;   /* INC – P0.22 */
+		};
+	};
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 7)>,
+				<NRF_PSEL(PWM_OUT1, 1, 5)>,
+				<NRF_PSEL(PWM_OUT2, 0, 22)>;
+			low-power-enable;
+		};
+	};
+
+	/* ---- PWM1: INL (common low-side) ---- */
+	pwm1_default: pwm1_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 18)>;  /* INL – P0.18 */
+		};
+	};
+	pwm1_sleep: pwm1_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 18)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* ================================================================
+ * LFXO – 32.768 kHz crystal ABS07-32.768KHZ-9-T
+ * Internal load capacitors 9 pF match crystal's CL specification.
+ * ================================================================ */
+&lfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <9000>;
+};
+
+/* ================================================================
+ * SPI0 – TMAG5273 (reg=0) + SSD1309 OLED (reg=1)
+ * ================================================================ */
+&spi0 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-1 = <&spi0_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>,   /* CS_TMAG  – P1.15 */
+		   <&gpio0  2 GPIO_ACTIVE_LOW>;    /* CSn_OLED – P0.02 */
+
+	tmag5273: tmag5273@0 {
+		compatible = "ti,tmag5273";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+		int-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;  /* ALRT_TMAG – P1.00 */
+	};
+
+	ssd1309: ssd1309@1 {
+		compatible = "solomon,ssd1306fb";
+		reg = <1>;
+		spi-max-frequency = <8000000>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0xF1>;
+		reset-gpios    = <&gpio1 14 GPIO_ACTIVE_LOW>;    /* OLED_RST – P1.14 */
+		data-cmd-gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;   /* D/C      – P1.13 */
+	};
+};
+
+/* ================================================================
+ * I2C1 – on-board I2C bus (accelerometer, …)
+ * ================================================================ */
+&i2c1 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	pinctrl-0 = <&i2c1_default>;
+	pinctrl-1 = <&i2c1_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_FAST>;
+};
+
+/* ================================================================
+ * PWM0 – DRV8311 high-side inputs INA / INB / INC
+ * ================================================================ */
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/* ================================================================
+ * PWM1 – DRV8311 common low-side INL
+ * ================================================================ */
+&pwm1 {
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/ {
+	chosen {
+		zephyr,display = &ssd1309;
+	};
+
+	/* ------------------------------------------------------------
+	 * Buttons B1–B8  (pull-up, active-low to GND)
+	 * ------------------------------------------------------------ */
+	buttons {
+		compatible = "gpio-keys";
+
+		button_b1: button_b1 {
+			gpios = <&gpio1  6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B1";
+			zephyr,code = <INPUT_KEY_1>;
+		};
+		button_b2: button_b2 {
+			gpios = <&gpio0 21 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B2";
+			zephyr,code = <INPUT_KEY_2>;
+		};
+		button_b3: button_b3 {
+			gpios = <&gpio1  8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B3";
+			zephyr,code = <INPUT_KEY_3>;
+		};
+		button_b4: button_b4 {
+			gpios = <&gpio0 20 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B4";
+			zephyr,code = <INPUT_KEY_4>;
+		};
+		button_b5: button_b5 {
+			gpios = <&gpio0 12 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B5";
+			zephyr,code = <INPUT_KEY_5>;
+		};
+		button_b6: button_b6 {
+			gpios = <&gpio1 12 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B6";
+			zephyr,code = <INPUT_KEY_6>;
+		};
+		button_b7: button_b7 {
+			gpios = <&gpio0 19 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B7";
+			zephyr,code = <INPUT_KEY_7>;
+		};
+		button_b8: button_b8 {
+			gpios = <&gpio1  4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "B8";
+			zephyr,code = <INPUT_KEY_8>;
+		};
+	};
+
+	/* ------------------------------------------------------------
+	 * Voltage selectors VSEL1–4  (GPIO outputs, active-high)
+	 * ------------------------------------------------------------ */
+	vsel_gpios {
+		compatible = "gpio-leds";
+		vsel1: vsel1 {
+			gpios = <&gpio0 23 GPIO_ACTIVE_HIGH>;   /* VSEL1 – P0.23 */
+			label = "VSEL1";
+		};
+		vsel2: vsel2 {
+			gpios = <&gpio1  7 GPIO_ACTIVE_HIGH>;   /* VSEL2 – P1.07 */
+			label = "VSEL2";
+		};
+		vsel3: vsel3 {
+			gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;   /* VSEL3 – P0.29 */
+			label = "VSEL3";
+		};
+		vsel4: vsel4 {
+			gpios = <&gpio1  9 GPIO_ACTIVE_HIGH>;   /* VSEL4 – P1.09 */
+			label = "VSEL4";
+		};
+	};
+
+	/* ------------------------------------------------------------
+	 * DRV8311 motor driver
+	 *   PWM channels: INA (OUT0), INB (OUT1), INC (OUT2), INL (OUT0/PWM1)
+	 * ------------------------------------------------------------ */
+	bldc_drv: bldc_drv {
+		compatible = "remote-two,bldc-drv8311";
+		pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,  /* INA – P0.07 */
+		       <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,  /* INB – P1.05 */
+		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>,  /* INC – P0.22 */
+		       <&pwm1 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>;  /* INL – P0.18 */
+		fault-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;          /* DRV_FAULT   – P0.11 */
+		sleep-gpios = <&gpio1  1 GPIO_ACTIVE_HIGH>;         /* DRV_SLEEP   – P1.01 */
+	};
+
+	/* ------------------------------------------------------------
+	 * Power / charging GPIOs
+	 * ------------------------------------------------------------ */
+	power_gpios {
+		compatible = "gpio-leds";
+		mic2288_mos: mic2288_mos {
+			gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;   /* MIC2288_MOS – P0.28 */
+			label = "MIC2288_MOS";
+		};
+		pwr_ctrl: pwr_ctrl {
+			gpios = <&gpio0 30 GPIO_ACTIVE_HIGH>;   /* CTRL        – P0.30 */
+			label = "CTRL";
+		};
+	};
+
+	charge_gpios {
+		compatible = "gpio-keys";
+		charge_stat: charge_stat {
+			gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;    /* CHARGE_STAT – P1.10 */
+			label = "CHARGE_STAT";
+		};
+		charge_alrt: charge_alrt {
+			gpios = <&gpio0 31 GPIO_ACTIVE_LOW>;    /* ALRT        – P0.31 */
+			label = "ALRT";
+		};
+		charge_irqn: charge_irqn {
+			gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;    /* IRQn        – P1.11 */
+			label = "IRQn";
+		};
+		accel_int: accel_int {
+			gpios = <&gpio0  5 GPIO_ACTIVE_HIGH>;   /* INT_ACCEL   – P0.05 */
+			label = "INT_ACCEL";
+		};
+	};
+
+	aliases {
+		spi-oled  = &ssd1309;
+		spi-tmag  = &tmag5273;
+		motor-drv = &bldc_drv;
+		sw0 = &button_b1;
+		sw1 = &button_b2;
+		sw2 = &button_b3;
+		sw3 = &button_b4;
+		sw4 = &button_b5;
+		sw5 = &button_b6;
+		sw6 = &button_b7;
+		sw7 = &button_b8;
+	};
+};

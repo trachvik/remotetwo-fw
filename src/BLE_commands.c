@@ -460,13 +460,14 @@ static void ble_queue_text(const char *text)
     struct ble_tx_msg msg;
     size_t len = strlen(text);
 
-    if (len >= BLE_MSG_MAX_LEN) {
-        len = BLE_MSG_MAX_LEN - 1;
+    if (len >= BLE_MSG_MAX_LEN - 1) {  /* -1 reserves space for \n terminator */
+        len = BLE_MSG_MAX_LEN - 2;
     }
 
     memcpy(msg.payload, text, len);
-    msg.payload[len] = '\0';
-    msg.len = (uint8_t)len;
+    msg.payload[len] = '\n';   /* newline terminator so gateway can frame messages */
+    msg.payload[len + 1] = '\0';
+    msg.len = (uint8_t)(len + 1);
 
     int ret = k_msgq_put(&ble_tx_msgq, &msg, K_NO_WAIT);
     if (ret == -ENOMSG) {
