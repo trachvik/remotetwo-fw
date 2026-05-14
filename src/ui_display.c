@@ -9,7 +9,13 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/atomic.h>
+
+/* CTRL – TPS62740 enable pin: drives display logic power rail.
+ * Drive HIGH at init to keep display always on. */
+static const struct gpio_dt_spec g_ctrl =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(pwr_ctrl), gpios);
 
 LOG_MODULE_REGISTER(ui_display, LOG_LEVEL_DBG);
 
@@ -211,6 +217,13 @@ static void request_render(void)
 
 int ui_display_init(void)
 {
+    /* Enable display logic power rail via TPS62740 CTRL pin */
+    if (gpio_is_ready_dt(&g_ctrl)) {
+        gpio_pin_configure_dt(&g_ctrl, GPIO_OUTPUT_ACTIVE);
+    } else {
+        LOG_WRN("CTRL GPIO not ready – display power rail may be off");
+    }
+
     g_disp = DEVICE_DT_GET(DT_NODELABEL(ssd1309));
     if (!device_is_ready(g_disp)) {
         LOG_ERR("SSD1309 device not ready");

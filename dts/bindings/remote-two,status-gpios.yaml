@@ -1,0 +1,12 @@
+description: Group node for status/interrupt GPIO inputs (charger, accelerometer, etc.)
+
+compatible: "remote-two,status-gpios"
+
+child-binding:
+  description: Individual status or interrupt GPIO input
+  properties:
+    gpios:
+      type: phandle-array
+      required: true
+    label:
+      type: string

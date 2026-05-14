@@ -1,0 +1,29 @@
+description: |
+  3-PWM BLDC motor driver node for DRV8311H.
+  INA/INB/INC are driven by three PWM channels.
+  INL (low-side enable), nSLEEP, and nFAULT are plain GPIOs.
+
+compatible: "remote-two,bldc-drv8311"
+
+properties:
+  pwms:
+    type: phandle-array
+    required: true
+    description: |
+      Three PWM specifiers in order INA, INB, INC.
+      Each entry: <&pwm_controller channel period_ns flags>.
+
+  inl-gpios:
+    type: phandle-array
+    required: true
+    description: INL (low-side enable) GPIO, active high.
+
+  sleep-gpios:
+    type: phandle-array
+    required: true
+    description: nSLEEP GPIO, active high = awake.
+
+  fault-gpios:
+    type: phandle-array
+    required: true
+    description: nFAULT GPIO, active low = fault asserted.

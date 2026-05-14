@@ -77,7 +77,7 @@
  * ================================================================ */
 &lfxo {
 	load-capacitors = "internal";
-	load-capacitance-femtofarad = <9000>;
+	load-capacitance-picofarad = <9>;
 };
 
 /* ================================================================
@@ -92,8 +92,8 @@
 	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>,   /* CS_TMAG  – P1.15 */
 		   <&gpio0  2 GPIO_ACTIVE_LOW>;    /* CSn_OLED – P0.02 */
 
-	tmag5273: tmag5273@0 {
-		compatible = "ti,tmag5273";
+	as5048a: as5048a@0 {
+		compatible = "ams,as5048a";
 		reg = <0>;
 		spi-max-frequency = <10000000>;
 		int-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;  /* ALRT_TMAG – P1.00 */
@@ -247,7 +247,7 @@
 	};
 
 	charge_gpios {
-		compatible = "gpio-keys";
+		compatible = "remote-two,status-gpios";
 		charge_stat: charge_stat {
 			gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;    /* CHARGE_STAT – P1.10 */
 			label = "CHARGE_STAT";
@@ -268,7 +268,7 @@
 
 	aliases {
 		spi-oled  = &ssd1309;
-		spi-tmag  = &tmag5273;
+		spi-tmag  = &as5048a;
 		motor-drv = &bldc_drv;
 		sw0 = &button_b1;
 		sw1 = &button_b2;
