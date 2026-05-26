@@ -80,4 +80,15 @@ void bldc_driver_3pwm_disable(bldc_driver_3pwm_t *driver);
 void bldc_driver_3pwm_set_pwm(bldc_driver_3pwm_t *driver,
                                float ua, float ub, float uc);
 
+/**
+ * Check whether the DRV8311H nFAULT pin is asserted.
+ * Reads the GPIO level directly on every call — catches faults that were
+ * already present at boot and would have been missed by the edge ISR.
+ * Also returns true if a fault was already latched by the ISR.
+ *
+ * @param driver  Pointer to driver structure.
+ * @return true if fault is active (nFAULT = LOW), false otherwise.
+ */
+bool bldc_driver_3pwm_is_fault(bldc_driver_3pwm_t *driver);
+
 #endif /* BLDC_DRIVER_3PWM_H */

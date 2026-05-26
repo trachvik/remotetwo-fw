@@ -1,0 +1,41 @@
+/* Minimal overlay for TMAG5170 debug testing only. */
+
+&pinctrl {
+	spi0_default: spi0_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 10)>;
+			bias-pull-up;
+		};
+	};
+
+	spi0_sleep: spi0_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
+				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi0 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-1 = <&spi0_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>;
+
+	tmag5170: tmag5170@0 {
+		compatible = "ti,tmag5170";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		operating-mode = <2>;
+		magnetic-channels = "XY";
+		angle-measurement = "XY";
+	};
+};

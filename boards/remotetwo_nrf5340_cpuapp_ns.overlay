@@ -5,7 +5,7 @@
  * LFXO  – 32.768 kHz crystal ABS07-32.768KHZ-9-T
  *   internal load capacitors set to 9 pF (= 9000 fF)
  *
- * SPI0  – TMAG5273 magnetic angle sensor  (CS: P1.15)
+ * SPI0  – TMAG5170 magnetic angle sensor  (CS: P1.15)
  *       + SSD1309 OLED display            (CS: P0.02)
  *   SCK  → P0.08   MOSI → P0.09   MISO → P0.10
  *
@@ -20,12 +20,15 @@
  */
 
 &pinctrl {
-	/* ---- SPI0: TMAG5273 + SSD1309 OLED ---- */
+	/* ---- SPI0: TMAG5170 + SSD1309 OLED ---- */
 	spi0_default: spi0_default {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
-				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
-				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+				<NRF_PSEL(SPIM_MOSI, 0, 9)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 10)>;
+			bias-pull-up;
 		};
 	};
 	spi0_sleep: spi0_sleep {
@@ -81,7 +84,7 @@
 };
 
 /* ================================================================
- * SPI0 – TMAG5273 (reg=0) + SSD1309 OLED (reg=1)
+ * SPI0 – TMAG5170 (reg=0) + SSD1309 OLED (reg=1)
  * ================================================================ */
 &spi0 {
 	compatible = "nordic,nrf-spim";
@@ -92,15 +95,18 @@
 	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>,   /* CS_TMAG  – P1.15 */
 		   <&gpio0  2 GPIO_ACTIVE_LOW>;    /* CSn_OLED – P0.02 */
 
-	as5048a: as5048a@0 {
-		compatible = "ams,as5048a";
+	tmag5170: tmag5170@0 {
+		compatible = "ti,tmag5170";
 		reg = <0>;
 		spi-max-frequency = <10000000>;
+		operating-mode = <2>;           /* active measure mode – continuous */
+		magnetic-channels = "XY";       /* only X+Y needed for angle */
+		angle-measurement = "XY";       /* hardware angle register */
 		int-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;  /* ALRT_TMAG – P1.00 */
 	};
 
 	ssd1309: ssd1309@1 {
-		compatible = "solomon,ssd1306fb";
+		compatible = "solomon,ssd1309fb";
 		reg = <1>;
 		spi-max-frequency = <8000000>;
 		width = <128>;
@@ -111,7 +117,7 @@
 		multiplex-ratio = <63>;
 		segment-remap;
 		com-invdir;
-		prechargep = <0xF1>;
+		prechargep = <0x22>;  /* Phase1=2, Phase2=2 DCLK — SSD1309 external VCC (12V). Was 0xF1 (SSD1306 charge pump). */
 		reset-gpios    = <&gpio1 14 GPIO_ACTIVE_LOW>;    /* OLED_RST – P1.14 */
 		data-cmd-gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;   /* D/C      – P1.13 */
 	};
@@ -268,7 +274,7 @@
 
 	aliases {
 		spi-oled  = &ssd1309;
-		spi-tmag  = &as5048a;
+		spi-tmag  = &tmag5170;
 		motor-drv = &bldc_drv;
 		sw0 = &button_b1;
 		sw1 = &button_b2;

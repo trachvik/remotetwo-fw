@@ -7,5 +7,7 @@
 			"path": "../remotetwo-gateway"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "remotetwo-fw"
+	}
 }

@@ -1,6 +1,4 @@
 #include "haptic.h"
-#include "drivers/as5048a.h"
-#include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
@@ -51,9 +49,6 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define MOTOR_KV_RATING 320.0f  /* rpm/V */
 #define MOTOR_INDUCTANCE 0.0001f /* H */
 
-/* AS5048A encoder from devicetree */
-#define AS5048A_NODE DT_NODELABEL(as5048a)
-static const struct spi_dt_spec as5048a_spi = SPI_DT_SPEC_GET(AS5048A_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPHA, 0);
 static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw0), gpios, {0});
 
 /* Haptic state variables */
@@ -186,16 +181,9 @@ int haptic_update_num_steps_from_button(void)
 int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 {
     bldc_driver_3pwm_t *driver_3pwm = (bldc_driver_3pwm_t *)driver;
-    struct as5048a_device *as5048a = (struct as5048a_device *)encoder;
 
-    /* Initialize AS5048A encoder */
-    LOG_INF("1. Initializing AS5048A encoder...");
-    if (as5048a_init(as5048a, &as5048a_spi) < 0)
-    {
-        LOG_ERR("   Failed to initialize AS5048A");
-        //return -1;
-    }
-    LOG_INF("   [OK] AS5048A ready");
+    /* TMAG5170 encoder is initialized automatically by the Zephyr sensor driver */
+    LOG_INF("1. TMAG5170 encoder ready (Zephyr driver)");
 
     /* Initialize DRV8311H 3PWM Driver */
     LOG_INF("2. Initializing DRV8311H 3PWM driver...");
@@ -291,23 +279,17 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     k_msleep(500);
     
     /* Store start angle for relative position calculation */
-    uint16_t startup_raw = 0;
-    if (as5048a_read_raw(as5048a, &startup_raw) == 0) {
-        start_angle = ((float)startup_raw / 16384.0f) * _2PI;
-        LOG_INF("Encoder startup_raw = %u, angle = %.2f deg",
-                startup_raw, (double)(start_angle * 180.0f / 3.14159f));
-    } else {
-        LOG_ERR("Failed to read encoder startup angle!");
-        start_angle = 0.0f;
-    }
+    sensor_update(NULL);
+    start_angle = sensor_get_angle(NULL);
+    LOG_INF("Encoder startup angle = %.2f deg",
+            (double)(start_angle * 180.0f / _PI));
 
     /* Encoder diagnostic: read 5 samples */
     LOG_INF("Encoder diagnostic (5 samples):");
     for (int i = 0; i < 5; i++) {
-        uint16_t raw = 0;
-        int ret = as5048a_read_raw(as5048a, &raw);
-        LOG_INF("  [%d] ret=%d raw=%u angle=%.2f deg",
-                i, ret, raw, (double)(((float)raw / 16384.0f) * 360.0f));
+        sensor_update(NULL);
+        float angle_deg = sensor_get_angle(NULL) * 180.0f / _PI;
+        LOG_INF("  [%d] angle=%.2f deg", i, (double)angle_deg);
         k_msleep(100);
     }
 

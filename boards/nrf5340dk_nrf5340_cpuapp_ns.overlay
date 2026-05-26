@@ -74,7 +74,7 @@
 	};
 };
 
-/* SPI3 - AS5048A encoder (reg=0) + SSD1309 display (reg=1) */
+/* SPI3 - TMAG5170 encoder (reg=0) + SSD1309 display (reg=1) */
 &spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
@@ -84,10 +84,12 @@
 	cs-gpios = <&gpio1 3 GPIO_ACTIVE_LOW>,
 		   <&gpio1 9 GPIO_ACTIVE_LOW>;
 
-	as5048a: as5048a@0 {
-		compatible = "ams,as5048a";
+	tmag5170: tmag5170@0 {
+		compatible = "ti,tmag5170";
 		reg = <0>;
 		spi-max-frequency = <8000000>;
+		operating-mode = <2>;
+		angle-measurement = "XY";
 	};
 
 	ssd1309: ssd1309@1 {

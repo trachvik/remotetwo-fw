@@ -24,7 +24,7 @@ To make this work in smooth mode, I must implement a virtual detent that activat
 [Zephyr Drivers](https://docs.zephyrproject.org/latest/build/dts/api/bindings.html)
 
 - [ ] make custom board devicetree
-- [ ] swap AS5048 with TMAG5170 - should not be difficuil - Zephyr has TMAG5170 driver
+- [x] swap AS5048 with TMAG5170 - should not be difficuil - Zephyr has TMAG5170 driver
 - [ ] TMC6300 -> DRV8311H
     - 6pwm -> 3pwm
     - INL control
