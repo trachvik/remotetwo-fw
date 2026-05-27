@@ -2,6 +2,9 @@
 build*/
 _build/
 
+# Docs
+docs/
+
 # Ignore CMake build files
 .ninja_deps
 .ninja_log
@@ -14,3 +17,4 @@ sysbuild_modules.txt
 zephyr_modules.txt
 zephyr_settings.txt
 build_info.yml*
+*.code-workspace

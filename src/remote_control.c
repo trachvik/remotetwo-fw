@@ -218,7 +218,7 @@ static void display_push_menu(void)
         break;
     case MENU_LEVEL_SD_CARD:
         header = "SD Card";
-        names[0] = "(files)";
+        names[0] = "TO DO";
         count = 1;
         sel   = 0;
         break;

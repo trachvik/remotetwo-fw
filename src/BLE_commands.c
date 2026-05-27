@@ -486,7 +486,7 @@ void ble_send_gcode(const char *cmd)
     }
 
     char framed[BLE_MSG_MAX_LEN];
-    int ret = snprintf(framed, sizeof(framed), "cmd:%u:%s", id, cmd);
+    int ret = snprintf(framed, sizeof(framed), "cmd:%u:%s\n", id, cmd);
     if (ret <= 0 || ret >= (int)sizeof(framed)) {
         LOG_WRN("Command too long, dropping '%s'", cmd);
         return;
