@@ -1,5 +1,11 @@
 /* Minimal overlay for TMAG5170 debug testing only. */
 
+/* Remove the SPI3-based TMAG5170 node defined in nrf5340dk_nrf5340_cpuapp_ns.overlay
+ * to avoid duplicate 'tmag5170' label when both overlays are applied together. */
+&spi3 {
+	/delete-node/ tmag5170@0;
+};
+
 &pinctrl {
 	spi0_default: spi0_default {
 		group1 {
