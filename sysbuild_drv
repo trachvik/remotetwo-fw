@@ -1,0 +1,2 @@
+# Alias without .conf extension for west/PowerShell argument splitting.
+SB_CONFIG_NETCORE_HCI_IPC=n

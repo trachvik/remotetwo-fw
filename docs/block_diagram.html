@@ -1,0 +1,265 @@
+﻿<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8" />
+  <title>RemoteTwo – Blokové schéma softwaru</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      padding: 2rem;
+    }
+    h1 {
+      text-align: center;
+      font-size: 1.5rem;
+      color: #58a6ff;
+      letter-spacing: .06em;
+      margin-bottom: .25rem;
+    }
+    .sub {
+      text-align: center;
+      color: #6e7681;
+      font-size: .82rem;
+      margin-bottom: 2.5rem;
+    }
+    pre.diagram {
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: .82rem;
+      line-height: 1.38;
+      background: #010409;
+      border: 1px solid #21262d;
+      border-radius: 8px;
+      padding: 1.6rem 2rem;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .p  { color: #79c0ff; }
+    .m  { color: #56d364; }
+    .h  { color: #d2a8ff; }
+    .u  { color: #ffa657; }
+    .b  { color: #39d353; }
+    .g  { color: #8b949e; }
+    .desc-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem 2.5rem;
+      margin-top: 3rem;
+      max-width: 1100px;
+    }
+    .desc-grid h2 {
+      grid-column: 1 / -1;
+      font-size: .95rem;
+      color: #58a6ff;
+      border-bottom: 1px solid #21262d;
+      padding-bottom: .4rem;
+      margin-bottom: .5rem;
+    }
+    .blk h3 { font-size: .83rem; margin-bottom: .35rem; }
+    .blk p  { font-size: .78rem; color: #8b949e; line-height: 1.6; }
+    .blk code { background: #161b22; padding: .05rem .28rem; border-radius: 3px; font-size: .76rem; }
+  </style>
+</head>
+<body>
+
+<h1>RemoteTwo &ndash; Blokové schéma softwaru</h1>
+<p class="sub">Nordic nRF5340 &nbsp;&middot;&nbsp; Zephyr RTOS &nbsp;&middot;&nbsp; SimpleFOC-C &nbsp;&middot;&nbsp; BLE NUS &nbsp;&middot;&nbsp; Raspberry Pi 3 gateway</p>
+
+<pre class="diagram">
+<span class="p">╔═══════════════════════════════════════════════════════════════════════════════════════════╗
+║                         PROGRAMOVACÍ PROSTŘEDÍ                                            ║
+║   ┌────────────────────────────────┐      ┌──────────────────────────────────────────┐   ║
+║   │       Nordic nRF5340           │─HAL─▶│            Zephyr RTOS                   │   ║
+║   │     nRF Connect SDK 2.x        │      │  threads · timers · semaphores · NVS     │   ║
+║   └────────────────────────────────┘      └──────────────────────────────────────────┘   ║
+╚═══════════════════════════════════════════════════════════════════════════════════════════╝</span>
+                    │
+                    │  HAL / kernel / BT stack
+                    ▼
+<span class="m">╔═══════════════════════════════════════════════════════════════════════════════════════════╗
+║                    MOTOROVÉ ŘÍZENÍ  ─  low-level                                          ║
+║                                                                                           ║
+║  ┌──────────────────────────┐  ┌────────────────────────────┐  ┌────────────────────┐   ║
+║  │    Enkodér TMAG5170      │  │   Startovací sekvence      │  │  Sync periferií    │   ║
+║  │  Zephyr sensor driver    │  │   zero-angle search        │  │  center-aligned    │   ║
+║  │  14-bit magnet. · SPI    │  │   → uložení do NVS flash   │  │  PWM               │   ║
+║  └────────────┬─────────────┘  └──────────────┬────────────┘  │  ADC HW trigger    │   ║
+║               │ úhel [rad]                    │ zero-offset    └────────┬───────────┘   ║
+║               └─────────────────┬─────────────┘                        │               ║
+║                                 ▼  ◄────────────────────────────────────┘               ║
+║  ┌─────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │                     haptic_loop()  @1 kHz                                        │    ║
+║  │       k_timer  ──▶  k_sem_give  ──▶  dedicated thread  (priority 0)            │    ║
+║  │             ARM Cortex-M33 FPU  +  CMSIS DSP  (arm_math.h)                     │    ║
+║  └──────────────────────────────────┬──────────────────────────────────────────────┘    ║
+║                                     │ Uα, Uβ  (voltage vector)                          ║
+║  ┌─────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │                   SimpleFOC  ─  přepsaný do C                                    │    ║
+║  │  ┌──────────────────────────────────┐   ┌──────────────────────────────────┐    │    ║
+║  │  │        bldc_motor.c              │──▶│     bldc_driver_3pwm.c           │    │    ║
+║  │  │  Voltage FOC · Space Vector PWM  │   │  DRV8311H  3-PWM                 │    │    ║
+║  │  │  Sine PWM modulation             │   │  nSLEEP · INL · nFAULT           │    │    ║
+║  │  └──────────────────────────────────┘   └──────────────────────────────────┘    │    ║
+║  └─────────────────────────────────────────────────────────────────────────────────┘    ║
+╚═══════════════════════════════════════════════════════════════════════════════════════════╝</span>
+                    │
+                    │  voltage setpoint  →  motor fáze
+                    ▼
+<span class="h">╔═══════════════════════════════════════════════════════════════════════════════════════════╗
+║                       HAPTIKA  ─  high-level                                              ║
+║                                                                                           ║
+║  ┌─────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │  Módový přepínač                                                                 │    ║
+║  │    SMOOTH          ─  plynulá odporová síla, IIR filtr rychlosti (α=0,03)        │    ║
+║  │    DETENT 16/12/8  ─  diskrétní zarážky, spring-type controller (α=0,30)         │    ║
+║  └────────────────────────────────────────┬────────────────────────────────────────┘    ║
+║                                           ▼                                              ║
+║  ┌─────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │  IIR výstupní filtry  +  Dead-zone blend                                         │    ║
+║  │    smooth_v_filt · detent_v_filt  ─  potlačení šumu enkodéru LSB                │    ║
+║  │    Hermite smoothstep  0,5° (nula)  →  2,5° (plná síla)  ─  bez buzzingu        │    ║
+║  └────────────────────────────────────────┬────────────────────────────────────────┘    ║
+║                                           │  voltage setpoint  →  FOC                   ║
+║                                                                                          ║
+║  ┌─────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │  Virtual click  ─  náhrada fyzického tlačítka                                    │    ║
+║  │    gesture zone  ─  přitlačení osy do definované úhlové zóny                     │    ║
+║  │    hold timer:   500 ms  =  potvrdit / Enter                                      │    ║
+║  │                  2 s     =  long-hold (rezerva pro budoucí příkaz)               │    ║
+║  └──────────────────────────────────┬──────────────────────────────────────────────┘    ║
+║                                     │                                                    ║
+║  ┌──────────────────────────────────▼──────────────────────────────────────────────┐    ║
+║  │  Callbacks                                                                        │    ║
+║  │    step_cb(dir)           ─  každý krok enkodéru  →  navigace v menu             │    ║
+║  │    virtual_click_cb(dir)  ─  potvrdit / zpět / long-hold                         │    ║
+║  └──────────────────────────────────┬──────────────────────────────────────────────┘    ║
+╚═════════════════════════════════════╪═════════════════════════════════════════════════╝</span>
+                         step / click │
+              ┌──────────────────────┘
+              ▼
+<span class="u">╔══════════════════════════════════════════╗</span>       <span class="b">╔══════════════════════════════════════════╗</span>
+<span class="u">║      UŽIVATELSKÉ ROZHRANÍ                ║</span>       <span class="b">║       BLE NUS KOMUNIKACE                 ║</span>
+<span class="u">║                                          ║</span>       <span class="b">║                                          ║</span>
+<span class="u">║  ┌──────────────────────────────────┐   ║</span>       <span class="b">║  ┌──────────────────────────────────┐   ║</span>
+<span class="u">║  │  remote_control.c               │   ║</span>       <span class="b">║  │  Nordic UART Service  (NUS)      │   ║</span>
+<span class="u">║  │  hierarchické stavové menu      │   ║──gcode─▶  │  Zephyr BT NUS stack · BLE 5.0   │   ║</span>
+<span class="u">║  │  menu_level_t  FSM              │   ║</span>       <span class="b">║  └──────────────────────────────────┘   ║</span>
+<span class="u">║  │                                 │   ║</span>       <span class="b">║  ┌──────────────────────────────────┐   ║</span>
+<span class="u">║  │  Edit screen:                   │   ║</span>       <span class="b">║  │  Protokol                        │   ║</span>
+<span class="u">║  │    param_desc_t                 │   ║</span>       <span class="b">║  │  cmd:⟨id⟩:⟨payload⟩            │   ║</span>
+<span class="u">║  │    step smooth/fine/coarse      │   ║</span>       <span class="b">║  │  ack:⟨id⟩:ok | err:⟨reason⟩   │   ║</span>
+<span class="u">║  └──────────────────────────────────┘   ║</span>       <span class="b">║  └──────────────────────────────────┘   ║</span>
+<span class="u">║                                          ║</span>       <span class="b">║  ┌──────────────────────────────────┐   ║</span>
+<span class="u">║  ┌──────────────────────────────────┐   ║</span>       <span class="b">║  │  BLE TX thread                   │   ║</span>
+<span class="u">║  │  SSD1309 OLED  ─  ui_display.c  │   ║</span>       <span class="b">║  │  k_msgq (16 zpráv) · priorita 7  │   ║</span>
+<span class="u">║  │  framebuffer · scroll            │   ║</span>       <span class="b">║  │  oddělen od haptic smyčky        │   ║</span>
+<span class="u">║  │  atomic flags → main loop push   │   ║</span>       <span class="b">║  └──────────────────────────────────┘   ║</span>
+<span class="u">║  └──────────────────────────────────┘   ║</span>       <span class="b">║  ┌──────────────────────────────────┐   ║</span>
+<span class="u">║                                          ║</span>       <span class="b">║  │  Stav tiskárny  (RX)             │   ║</span>
+<span class="u">║  ┌──────────────────────────────────┐   ║◀─state─  │  ble_printer_state · k_mutex      │   ║</span>
+<span class="u">║  │  Status screen  (po 5 s idle)    │   ║</span>       <span class="b">║  │  pos · temp · fan · progress     │   ║</span>
+<span class="u">║  │  XYZ · temp · fan · progress     │   ║</span>       <span class="b">║  └──────────────────────────────────┘   ║</span>
+<span class="u">║  └──────────────────────────────────┘   ║</span>       <span class="b">║                                          ║</span>
+<span class="u">╚══════════════════════════════════════════╝</span>       <span class="b">╚════════════════╤═════════════════════════╝</span>
+                                                                    │
+                                                                    │  BLE 5.0  (Nordic UART)
+                                                                    ▼
+                                             <span class="g">╔══════════════════════════════════════════╗
+                                             ║    GATEWAY  ─  Raspberry Pi 3            ║
+                                             ║                                          ║
+                                             ║  ┌──────────────────────────────────┐   ║
+                                             ║  │  gateway.py                      │   ║
+                                             ║  │  bleak  ─  asyncio BLE klient    │   ║
+                                             ║  └─────────────────┬────────────────┘   ║
+                                             ║                    │                    ║
+                                             ║  ┌─────────────────▼────────────────┐   ║
+                                             ║  │  protocol.py                     │   ║
+                                             ║  │  ProtocolTranslator              │   ║
+                                             ║  │  NUS payload  →  G-code          │   ║
+                                             ║  └─────────────────┬────────────────┘   ║
+                                             ║                    │ G-code             ║
+                                             ║  ┌─────────────────▼────────────────┐   ║
+                                             ║  │  moonraker.py                    │   ║
+                                             ║  │  MoonrakerClient                 │   ║
+                                             ║  │  HTTP API  →  Klipper            │   ║
+                                             ║  │  stav tiskárny  ←  polling       │   ║
+                                             ║  └──────────────────────────────────┘   ║
+                                             ╚══════════════════════════════════════════╝</span>
+</pre>
+
+<div class="desc-grid">
+  <h2>Popis bloků</h2>
+
+  <div class="blk">
+    <h3 class="p">Programovací prostředí</h3>
+    <p>Cílová platforma je <strong>Nordic nRF5340</strong> (dual-core Cortex-M33, BLE 5.0).
+    Firmware je postaven na <strong>Zephyr RTOS</strong> přes nRF Connect SDK 2.x.
+    Zephyr poskytuje preemptivní vlákna, <code>k_timer</code>, semafory, fronty zpráv
+    (<code>k_msgq</code>) a perzistentní flash úložiště (<strong>NVS</strong>).
+    Ladění přes RTT (bez sériového portu). Systémový tick = <code>10 000 Hz</code>
+    pro pokrytí 1 kHz haptic smyčky.</p>
+  </div>
+
+  <div class="blk">
+    <h3 class="m">Motorové řízení &ndash; low-level</h3>
+    <p>Jádro tvoří <strong>SimpleFOC přepsaný do C</strong> (<code>bldc_motor.c</code>,
+    <code>bldc_driver_3pwm.c</code>). Používá <em>voltage-mode FOC</em> se SVPWM / Sine PWM
+    a driverem <strong>DRV8311H</strong> v 3-PWM režimu. Enkodér <strong>TMAG5170</strong>
+    (14-bit magnetický, Zephyr sensor driver, SPI) dodává úhel rotoru.
+    Startovací sekvence najde elektrický nulový bod a výsledek uloží do NVS flash.
+    <em>Center-aligned PWM</em> synchronizuje ADC trigger na střed periody pro
+    eliminaci switching noise. <code>haptic_loop()</code> běží @1 kHz přes
+    <code>k_timer</code> → semafor → dedikované vlákno (prio 0).
+    Veškerá matematika akcelerována <strong>HW FPU</strong> + CMSIS DSP (<code>arm_math.h</code>).</p>
+  </div>
+
+  <div class="blk">
+    <h3 class="h">Haptika &ndash; high-level</h3>
+    <p>Čtyři <strong>módy</strong>: <em>SMOOTH</em> (plynulá odporová síla, IIR &alpha;=0,03
+    filtruje rychlost mezi tikmi) a <em>DETENT 16/12/8 kroků</em> (diskrétní zarážky,
+    spring-type, IIR &alpha;=0,30 zachovává snapping).
+    <strong>Hermite smoothstep</strong> (0,5°–2,5°) vyhlazuje dead-zónu &ndash;
+    zabraňuje buzzingu ze šumu enkodéru LSB.
+    <strong>Virtual click</strong> detekuje přitlačení osy (gesture zone) a hold timer
+    (500 ms = Enter, 2 s = long-hold) &ndash; aktuátor plně nahrazuje fyzické tlačítko.
+    Výstupem jsou callbacky <code>step_cb</code> a <code>virtual_click_cb</code>.</p>
+  </div>
+
+  <div class="blk">
+    <h3 class="u">Uživatelské rozhraní</h3>
+    <p><code>remote_control.c</code> &ndash; <strong>hierarchické stavové menu</strong>
+    (FSM přes <code>menu_level_t</code>): Root → Control / Temperature / Filament /
+    Calibration / MMU / Macros / Printing / Z-offset.
+    Edit screen (<code>param_desc_t</code>) s granularitou kroku dle rychlosti otáčení.
+    Výstup na <strong>SSD1309 OLED</strong> (<code>ui_display.c</code>, framebuffer).
+    Aktualizace displeje se neprovedou přímo z haptic callbacků (race condition vůči
+    render smyčce) &ndash; místo toho <strong>atomic pending flag</strong> + push
+    z main loop. Po 5 s idle se zobrazí <em>status screen</em> (XYZ, teploty, fan, progress).</p>
+  </div>
+
+  <div class="blk">
+    <h3 class="b">BLE NUS komunikace</h3>
+    <p>BLE 5.0 peripheral s <strong>Nordic UART Service (NUS)</strong> (Zephyr BT stack).
+    Protokol: <code>cmd:&lt;id&gt;:&lt;payload&gt;</code> &ndash; 16-bit sekvenční číslo,
+    gateway odpovídá <code>ack:&lt;id&gt;:ok</code> / <code>err:&lt;reason&gt;</code>.
+    <strong>Dedikované TX vlákno</strong> (<code>k_msgq</code>, 16 zpráv, prio 7) &ndash;
+    oddělen od haptic smyčky, BLE latence neovlivní motorové řízení.
+    Příchozí stav tiskárny parsován do <code>ble_printer_state</code> chráněné
+    <code>k_mutex</code>.</p>
+  </div>
+
+  <div class="blk">
+    <h3 class="g">Gateway &ndash; Raspberry Pi 3</h3>
+    <p>Python service na RPi 3. <code>gateway.py</code> &ndash; <strong>bleak</strong>
+    (asyncio BLE klient) pro připojení k nRF5340. <code>protocol.py</code>
+    (<code>ProtocolTranslator</code>) &ndash; NUS payload → G-code nebo přímý passthrough.
+    <code>moonraker.py</code> (<code>MoonrakerClient</code>) &ndash; G-code přes
+    <strong>Moonraker HTTP API</strong> do Klipperu; periodické čtení stavu tiskárny
+    (poloha, teploty, progress) a odeslání zpět na zařízení přes NUS notify.</p>
+  </div>
+
+</div>
+
+</body>
+</html>

@@ -1,0 +1,22 @@
+mainmenu "RemoteTwo"
+
+source "Kconfig.zephyr"
+
+menu "Application build target"
+
+	choice APP_BUILD
+		prompt "Application to build"
+		default APP_MAIN
+
+	config APP_MAIN
+		bool "Main application (BLE + display + motor FOC)"
+
+	config APP_TMAG_TEST
+		bool "TMAG5170 sensor stand-alone test"
+
+	config APP_DRV_TEST
+		bool "DRV8311H 3PWM driver open-loop test"
+
+	endchoice
+
+endmenu

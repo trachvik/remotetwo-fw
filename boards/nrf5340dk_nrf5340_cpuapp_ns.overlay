@@ -116,6 +116,7 @@ pwm_high: &pwm0 {
 	pinctrl-names = "default", "sleep";
 };
 
+
 /* PWM1 - low-side phase signals */
 pwm_low: &pwm1 {
 	status = "okay";
@@ -135,14 +136,25 @@ pwm_low: &pwm1 {
 	 * to swap which channel drives which phase edit the pwms list here.
 	 * No C code needs to be touched.
 	 */
+	/* 3PWM BLDC driver for DRV8311H */
+	bldc_drv: bldc_drv {
+		compatible = "remote-two,bldc-drv8311";
+		pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,
+		       <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,
+		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>;
+		inl-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&gpio1 1 GPIO_ACTIVE_HIGH>;
+		fault-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+	};
+
 	bldc_6pwm: bldc_6pwm {
-		compatible = "remote-two,bldc-6pwm";
-		pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase A high */
-		       <&pwm1 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase A low  */
-		       <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase B high */
-		       <&pwm1 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase B low  */
-		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase C high */
-		       <&pwm1 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>;   /* Phase C low  */
+		 compatible = "remote-two,bldc-6pwm";
+		 pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase A high */
+			 <&pwm1 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase A low  */
+			 <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase B high */
+			 <&pwm1 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase B low  */
+			 <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>,   /* Phase C high */
+			 <&pwm1 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>;   /* Phase C low  */
 	};
 
 	aliases {

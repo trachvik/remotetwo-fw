@@ -1,0 +1,30 @@
+/*
+ * DRV8311H 3PWM pin override.
+ * Applied on top of nrf5340dk_nrf5340_cpuapp_ns.overlay for the build_drv build.
+ *
+ * PWM0 channels routed to the actual INA/INB/INC pins on the PCB:
+ *   OUT0 (INA) -> P0.07
+ *   OUT1 (INB) -> P1.05
+ *   OUT2 (INC) -> P0.22
+ *
+ * The base overlay maps PWM0 to P1.14/P1.12/P1.10 (6PWM high-side).
+ * This overlay replaces that mapping for the 3PWM DRV8311H build.
+ */
+
+&pinctrl {
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 7)>,   /* INA -> P0.07 */
+				<NRF_PSEL(PWM_OUT1, 1, 5)>,    /* INB -> P1.05 */
+				<NRF_PSEL(PWM_OUT2, 0, 22)>;   /* INC -> P0.22 */
+		};
+	};
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 7)>,
+				<NRF_PSEL(PWM_OUT1, 1, 5)>,
+				<NRF_PSEL(PWM_OUT2, 0, 22)>;
+			low-power-enable;
+		};
+	};
+};

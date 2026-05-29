@@ -1,0 +1,66 @@
+SSD1309 display fix — solomon,ssd1306fb -> solomon,ssd1309fb
+=============================================================
+
+PROBLEM
+-------
+Overlay měl compatible = "solomon,ssd1306fb" místo "solomon,ssd1309fb".
+Zephyr ssd1306.c driver rozlišuje tyto dva typy přes flag ssd1309_compatible.
+
+Když ssd1309_compatible = false (ssd1306fb):
+  - Driver posílá charge pump příkaz: 0x8D 0x14  <- SSD1309 toto NEMÁ
+  - Driver posílá IREF mode příkaz               <- SSD1309 toto NEMÁ
+  - VCOMH nastaven na 0x20 (32% VCC)             <- špatně pro SSD1309
+
+Když ssd1309_compatible = true (ssd1309fb):
+  - Charge pump příkaz přeskočen                 <- správně
+  - IREF mode příkaz přeskočen                   <- správně
+  - VCOMH nastaven na 0x34 (78% VCC)             <- správně pro SSD1309
+
+Relevantní kód z C:\ncs\v3.2.2\zephyr\drivers\display\ssd1306.c:
+
+  #define SSD1306_PANEL_VCOM_DESEL_LEVEL          0x20
+  #define SSD1306_PANEL_VCOM_DESEL_LEVEL_SSD1309  0x34
+
+  static inline int ssd1306_set_timing_setting(const struct device *dev)
+  {
+      ...
+      SSD1306_SET_VCOM_DESELECT_LEVEL,
+      config->ssd1309_compatible ? SSD1306_PANEL_VCOM_DESEL_LEVEL_SSD1309 :
+                                   SSD1306_PANEL_VCOM_DESEL_LEVEL
+      ...
+  }
+
+  static int ssd1306_init_device(const struct device *dev)
+  {
+      ...
+      if (!config->ssd1309_compatible) {
+          ssd1306_set_charge_pump(dev);   // 0x8D 0x14 — jen pro SSD1306
+          ssd1306_set_iref_mode(dev);
+      }
+      ...
+  }
+
+FIX — boards/remotetwo_nrf5340_cpuapp_ns.overlay
+-------------------------------------------------
+BYLO:
+  ssd1309: ssd1309@1 {
+      compatible = "solomon,ssd1306fb";
+
+NYNI:
+  ssd1309: ssd1309@1 {
+      compatible = "solomon,ssd1309fb";
+
+Ostatní overlay parametry zůstávají beze změny:
+  - prechargep = <0x22>  (opraveno dříve, bylo 0xF1 pro SSD1306 charge pump)
+  - segment-remap, com-invdir, multiplex-ratio atd. jsou sdíleny přes
+    solomon,ssd1306fb-common.yaml takže jsou kompatibilní
+
+KONTEXT — proč 12.74V
+---------------------
+SSD1309 nemá interní charge pump (na rozdíl od SSD1306).
+Proto se na VCC pin přivádí přímo OLED panel voltage externě (12.74V).
+VDD (logika) zůstává 3.31V.
+
+Laskkit modul fungoval protože měl na své PCB vlastní boost konvertor
+který generoval panel voltage interně z 3.3V — firmware/driver to nemusel řešit.
+Na bare WEO012864GWPP3N00000 je SSD1309 přímo přístupný.

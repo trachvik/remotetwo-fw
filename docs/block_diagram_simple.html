@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8" />
+  <title>RemoteTwo – Zjednodušené blokové schéma</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 {
+      font-size: 1.4rem;
+      color: #58a6ff;
+      letter-spacing: .06em;
+      margin-bottom: .25rem;
+    }
+    .sub {
+      color: #6e7681;
+      font-size: .82rem;
+      margin-bottom: 2.5rem;
+    }
+    pre.diagram {
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: .9rem;
+      line-height: 1.45;
+      background: #010409;
+      border: 1px solid #21262d;
+      border-radius: 10px;
+      padding: 2rem 2.5rem;
+      white-space: pre;
+    }
+    .p  { color: #79c0ff; }
+    .m  { color: #56d364; }
+    .h  { color: #d2a8ff; }
+    .u  { color: #ffa657; }
+    .b  { color: #39d353; }
+    .g  { color: #8b949e; }
+    .ar { color: #484f58; }
+  </style>
+</head>
+<body>
+
+<h1>RemoteTwo &ndash; Blokové schéma softwaru</h1>
+<p class="sub">zjednodušený přehled</p>
+
+<pre class="diagram">
+<span class="p">  ╔═══════════════════════════════════════════════════╗
+  ║           PROGRAMOVACÍ PROSTŘEDÍ                  ║
+  ║        Nordic nRF5340  ·  Zephyr RTOS             ║
+  ╚═══════════════════════════════════════════════════╝</span>
+<span class="ar">                        │
+                        │ HAL / kernel / BT stack
+                        │
+                        ▼</span>
+<span class="m">  ╔═══════════════════════════════════════════════════╗
+  ║        MOTOROVÉ ŘÍZENÍ  ─  low-level              ║
+  ║                                                   ║
+  ║  Enkodér TMAG5170  ·  SimpleFOC → C               ║
+  ║  DRV8311H 3-PWM  ·  center-aligned PWM            ║
+  ║  haptic_loop @1 kHz  ·  FPU + CMSIS DSP           ║
+  ╚═══════════════════════════════════════════════════╝</span>
+<span class="ar">                        │
+                        │ voltage setpoint
+                        │
+                        ▼</span>
+<span class="h">  ╔═══════════════════════════════════════════════════╗
+  ║           HAPTIKA  ─  high-level                  ║
+  ║                                                   ║
+  ║  Módy: SMOOTH  |  DETENT 16 / 12 / 8             ║
+  ║  Virtual click  ─  náhrada tlačítka               ║
+  ║  Callbacks: step_cb · virtual_click_cb            ║
+  ╚═══════════════════════════════════════════════════╝</span>
+<span class="ar">                        │
+              ┌─────────┴──────────┐
+              │   step / click     │
+              │                    │
+              ▼                    ▼</span>
+<span class="u">  ╔═══════════════════════╗</span>    <span class="b">╔═══════════════════════════╗</span>
+<span class="u">  ║   UŽIVATELSKÉ         ║</span>    <span class="b">║    BLE NUS KOMUNIKACE     ║</span>
+<span class="u">  ║   ROZHRANÍ            ║</span>    <span class="b">║                           ║</span>
+<span class="u">  ║                       ║◄───▶  ║  Nordic UART Service      ║</span>
+<span class="u">  ║  Hierarchické menu    ║</span>    <span class="b">║  cmd:id:payload           ║</span>
+<span class="u">  ║  SSD1309 OLED         ║</span>    <span class="b">║  TX thread · k_msgq       ║</span>
+<span class="u">  ╚═══════════════════════╝</span>    <span class="b">╚═══════════════╤═══════════╝</span>
+<span class="ar">                                               │
+                                               │ BLE 5.0
+                                               │
+                                               ▼</span>
+<span class="g">                              ╔═══════════════════════════╗
+                              ║  GATEWAY  ─  RPi 3        ║
+                              ║                           ║
+                              ║  bleak  (BLE klient)      ║
+                              ║  ProtocolTranslator       ║
+                              ║  MoonrakerClient          ║
+                              ║  → Klipper                ║
+                              ╚═══════════════════════════╝</span>
+</pre>
+
+</body>
+</html>

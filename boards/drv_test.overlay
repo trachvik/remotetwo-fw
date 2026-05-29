@@ -1,0 +1,65 @@
+/*
+ * Minimal device-tree overlay for DRV8311H 3PWM open-loop driver test.
+ *
+ * Pin assignment (nRF5340DK GPIO headers):
+ *
+ *   INA    → P0.07  (PWM0 OUT0) — high-side phase A gate signal
+ *   INB    → P1.05  (PWM0 OUT1) — high-side phase B gate signal
+ *   INC    → P0.22  (PWM0 OUT2) — high-side phase C gate signal
+ *   INL    → P0.18  (GPIO out)  — shared low-side enable
+ *   nSLEEP → P1.01  (GPIO out)  — sleep control, HIGH = awake
+ *   nFAULT → P0.11  (GPIO in)   — active-low fault indicator
+ *
+ * INL logic level (DRV8311H datasheet, Table 1 – 3PWM mode):
+ *   INL = HIGH → low-side gates enabled, complementary PWM (normal operation)
+ *   INL = LOW  → all low-side gates forced off, motor coasts (Hi-Z)
+ * The driver asserts INL HIGH inside bldc_driver_3pwm_init_hw().
+ *
+ * Slew rate: set to 75 V/µs by hardware (IDRIVEN/IDRIVEP resistors).
+ * No firmware configuration required.
+ */
+
+&pinctrl {
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0,  7)>,  /* INA – P0.07 */
+				<NRF_PSEL(PWM_OUT1, 1,  5)>,  /* INB – P1.05 */
+				<NRF_PSEL(PWM_OUT2, 0, 22)>;  /* INC – P0.22 */
+		};
+	};
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0,  7)>,
+				<NRF_PSEL(PWM_OUT1, 1,  5)>,
+				<NRF_PSEL(PWM_OUT2, 0, 22)>;
+			low-power-enable;
+		};
+	};
+};
+
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/ {
+	bldc_drv: bldc_drv {
+		compatible = "remote-two,bldc-drv8311";
+
+		/* PWM order: INA (idx 0), INB (idx 1), INC (idx 2) */
+		pwms = <&pwm0 0 PWM_KHZ(25) PWM_POLARITY_NORMAL>,
+		       <&pwm0 1 PWM_KHZ(25) PWM_POLARITY_NORMAL>,
+		       <&pwm0 2 PWM_KHZ(25) PWM_POLARITY_NORMAL>;
+
+		/* INL = HIGH for normal operation (see INL note above) */
+		inl-gpios   = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+
+		/* nSLEEP: HIGH = device awake */
+		sleep-gpios = <&gpio1  1 GPIO_ACTIVE_HIGH>;
+
+		/* nFAULT: active-low, falling edge = fault asserted */
+		fault-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+	};
+};

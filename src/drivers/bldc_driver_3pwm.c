@@ -4,7 +4,7 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(bldc_drv3pwm, LOG_LEVEL_WRN);
+LOG_MODULE_REGISTER(bldc_drv3pwm, LOG_LEVEL_INF);
 
 #define _CONSTRAIN(x, lo, hi) ((x) < (lo) ? (lo) : ((x) > (hi) ? (hi) : (x)))
 
@@ -100,33 +100,61 @@ int bldc_driver_3pwm_init_hw(bldc_driver_3pwm_t *driver)
     /* All channels to 0 % duty cycle */
     write_duty_cycles(g_period_ns, 0.0f, 0.0f, 0.0f);
 
-    /* Configure nSLEEP – drive HIGH (always awake) */
+    /* Configure nSLEEP – reset pulse (LOW→HIGH) clears any latched faults */
     if (!gpio_is_ready_dt(&gpio_sleep)) {
         LOG_ERR("nSLEEP GPIO not ready");
         return DRIVER_INIT_FAILED;
     }
-    gpio_pin_configure_dt(&gpio_sleep, GPIO_OUTPUT_ACTIVE);   /* active-high → HIGH */
+    /* GPIO_OUTPUT | GPIO_INPUT enables the input buffer so we can read back
+     * the actual pin level (nRF5340 disables input buffer on plain GPIO_OUTPUT) */
+    gpio_pin_configure_dt(&gpio_sleep, GPIO_OUTPUT_INACTIVE | GPIO_INPUT);
+    k_sleep(K_MSEC(2));
+    gpio_pin_set_dt(&gpio_sleep, 1);                          /* drive HIGH = awake */
+    k_sleep(K_MSEC(5));
+    LOG_INF("nSLEEP reset pulse done");
 
     /* Configure INL – drive HIGH (low-side bridge permanently enabled) */
     if (!gpio_is_ready_dt(&gpio_inl)) {
         LOG_ERR("INL GPIO not ready");
         return DRIVER_INIT_FAILED;
     }
-    gpio_pin_configure_dt(&gpio_inl, GPIO_OUTPUT_ACTIVE);     /* active-high → HIGH */
+    gpio_pin_configure_dt(&gpio_inl, GPIO_OUTPUT_ACTIVE | GPIO_INPUT);
 
     /* Configure nFAULT – input with interrupt on falling edge (fault asserted) */
     if (!gpio_is_ready_dt(&gpio_fault)) {
         LOG_WRN("nFAULT GPIO not ready – fault detection disabled");
     } else {
         gpio_pin_configure_dt(&gpio_fault, GPIO_INPUT);
+
+        /* Read physical (raw) pin value – independent of ACTIVE_LOW flag.
+         * nFAULT is open-drain: HIGH = OK, LOW = fault asserted by IC. */
+        int raw = gpio_pin_get_raw(gpio_fault.port, gpio_fault.pin);
+        LOG_INF("nFAULT raw pin level = %d  (1=HIGH=OK, 0=LOW=fault)", raw);
+        if (raw == 0) {
+            LOG_ERR("DRV8311H nFAULT is LOW (fault asserted)! "
+                    "Check HW fault, OCP, open-load, or VCP charge-pump.");
+        } else {
+            LOG_INF("nFAULT = HIGH (OK), IC ready");
+        }
+
         gpio_pin_interrupt_configure_dt(&gpio_fault, GPIO_INT_EDGE_FALLING);
         gpio_init_callback(&fault_cb_data, fault_isr,
                            BIT(gpio_fault.pin));
         gpio_add_callback(gpio_fault.port, &fault_cb_data);
-        LOG_INF("nFAULT interrupt configured on P%d.%02d",
+        LOG_INF("nFAULT interrupt on P%d.%02d",
                 gpio_fault.port == DEVICE_DT_GET(DT_NODELABEL(gpio0)) ? 0 : 1,
                 gpio_fault.pin);
     }
+
+    /* Log raw GPIO states of all control signals for pin assignment verification */
+    LOG_INF("INL  raw=%d  (P%d.%02d, expect HIGH)",
+            gpio_pin_get_raw(gpio_inl.port, gpio_inl.pin),
+            gpio_inl.port == DEVICE_DT_GET(DT_NODELABEL(gpio0)) ? 0 : 1,
+            gpio_inl.pin);
+    LOG_INF("nSLEEP raw=%d  (P%d.%02d, expect HIGH)",
+            gpio_pin_get_raw(gpio_sleep.port, gpio_sleep.pin),
+            gpio_sleep.port == DEVICE_DT_GET(DT_NODELABEL(gpio0)) ? 0 : 1,
+            gpio_sleep.pin);
 
     driver->initialized = true;
     LOG_INF("DRV8311H 3PWM driver ready: freq=%ld Hz, period=%u ns, Vsupply=%.1f V",
