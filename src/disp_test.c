@@ -1,13 +1,9 @@
 /*
- * SSD1309 display communication test.
- *
- * Self-contained – no dependencies on ui_display / BLE / haptic.
- * Cycles through text messages on the display so it's immediately obvious
- * whether the MCU is talking to the SSD1309 over SPI.
+ * SSD1309 OLED display test – RemoteTwo custom PCB.
  *
  * Build:
  *   west build -b nrf5340dk/nrf5340/cpuapp -d build_disp --pristine -- \
- *     "-DDTC_OVERLAY_FILE=boards/nrf5340dk_nrf5340_cpuapp_ns.overlay;boards/nrf5340dk_nrf5340_cpuapp_disp.overlay" \
+ *     "-DDTC_OVERLAY_FILE=boards/remotetwo_nrf5340_cpuapp_ns.overlay" \
  *     "-DCONF_FILE=prj_disp.conf"
  */
 
@@ -22,17 +18,13 @@
 
 LOG_MODULE_REGISTER(disp_test, LOG_LEVEL_INF);
 
-/* ── Power rail GPIOs ────────────────────────────────────────────────
- * pwr_ctrl  P0.30 – TPS62740 CTRL: enables SSD1309 logic VDD
- * mic2288_mos P0.28 – MIC2288 boost gate: enables 12.6 V OLED panel VCC
- *
- * Both must be HIGH before the SSD1309 driver initialises (POST_KERNEL 91).
- * Only compiled when the nodes exist (custom PCB overlay).              */
+/* ── Power rails (POST_KERNEL 10, before display driver at 91) ──────────
+ * pwr_ctrl    P0.30 – TPS62740 CTRL: SSD1309 logic VDD
+ * mic2288_mos P0.28 – MIC2288 boost gate: 12.6 V OLED panel VCC       */
 #if DT_NODE_EXISTS(DT_NODELABEL(pwr_ctrl))
 static const struct gpio_dt_spec g_pwr_ctrl =
     GPIO_DT_SPEC_GET(DT_NODELABEL(pwr_ctrl), gpios);
 #endif
-
 #if DT_NODE_EXISTS(DT_NODELABEL(mic2288_mos))
 static const struct gpio_dt_spec g_mic2288_mos =
     GPIO_DT_SPEC_GET(DT_NODELABEL(mic2288_mos), gpios);
@@ -40,32 +32,16 @@ static const struct gpio_dt_spec g_mic2288_mos =
 
 static int power_rails_enable(void)
 {
-    int ret;
-
 #if DT_NODE_EXISTS(DT_NODELABEL(pwr_ctrl))
-    printk("[pwr_ctrl] SYS_INIT entering, gpio_is_ready=%d\n",
-           gpio_is_ready_dt(&g_pwr_ctrl));
     if (gpio_is_ready_dt(&g_pwr_ctrl)) {
-        ret = gpio_pin_configure_dt(&g_pwr_ctrl, GPIO_OUTPUT_ACTIVE);
-        printk("[pwr_ctrl] P0.30 HIGH (TPS62740 logic VDD ON), ret=%d\n", ret);
-    } else {
-        printk("[pwr_ctrl] GPIO not ready!\n");
+        gpio_pin_configure_dt(&g_pwr_ctrl, GPIO_OUTPUT_ACTIVE);
     }
 #endif
-
 #if DT_NODE_EXISTS(DT_NODELABEL(mic2288_mos))
-    printk("[mic2288] SYS_INIT entering, gpio_is_ready=%d\n",
-           gpio_is_ready_dt(&g_mic2288_mos));
     if (gpio_is_ready_dt(&g_mic2288_mos)) {
-        ret = gpio_pin_configure_dt(&g_mic2288_mos, GPIO_OUTPUT_ACTIVE);
-        printk("[mic2288] P0.28 HIGH (MIC2288 boost ON → 12.6V OLED VCC), ret=%d\n", ret);
-    } else {
-        printk("[mic2288] GPIO not ready!\n");
+        gpio_pin_configure_dt(&g_mic2288_mos, GPIO_OUTPUT_ACTIVE);
     }
 #endif
-
-    /* Give both regulators time to stabilise before the SSD1309 driver
-     * runs at POST_KERNEL 90.  ready-time-ms=200 in DT adds further margin. */
     k_sleep(K_MSEC(20));
     return 0;
 }
@@ -295,107 +271,32 @@ static void screen_stripes(const struct device *disp)
     fb_flush(disp);
 }
 
-/* ── SPI connectivity diagnostics ───────────────────────────────────────
- *
- * Run once at startup. Three tests, each with a log message explaining
- * the expected visual result.
- *
- * DIAG-1 (REVERSE DISPLAY command only, no data write):
- *   Sends 0xA7 via D/C=LOW (command mode).
- *   Power-on GDDRAM is all-zero; inverted mode → all pixels ON.
- *   If display stays BLACK: SPI command lane is dead (check D/C, CS, CLK,
- *   MOSI, RST pin connectivity and power).
- *
- * DIAG-2 (all-0xFF data write, normal display):
- *   Writes 1024 bytes of 0xFF via D/C=HIGH (data mode) → all pixels ON.
- *   If DIAG-1 was WHITE but DIAG-2 is BLACK: D/C polarity on data phase
- *   is wrong, or SPI MOSI/CLK signals don't reach the panel.
- *
- * DIAG-3 (all-0x00 data write):
- *   Confirms we can write zeros; display should be entirely BLACK.
- */
-static void diagnostic_spi_connectivity(const struct device *disp)
-{
-    LOG_INF("--- DIAG-1: REVERSE DISPLAY (cmd only, no data) ---");
-    LOG_INF("  Expected: entire display WHITE for ~4 s");
-    LOG_INF("  If BLACK: SPI command path broken (D/C, CS, CLK, power)");
-    fb_clear();
-    fb_flush(disp);                                      /* ensure GDDRAM = 0 */
-    display_set_pixel_format(disp, PIXEL_FORMAT_MONO10); /* sends 0xA7 */
-    k_sleep(K_MSEC(4000));
-    display_set_pixel_format(disp, PIXEL_FORMAT_MONO01); /* sends 0xA6 */
-    k_sleep(K_MSEC(300));
-
-    LOG_INF("--- DIAG-2: all-0xFF buffer write ---");
-    LOG_INF("  Expected: entire display WHITE for ~4 s");
-    LOG_INF("  If BLACK (DIAG-1 was white): data path / D/C polarity issue");
-    memset(g_fb, 0xFF, BUF_LEN);
-    fb_flush(disp);
-    k_sleep(K_MSEC(4000));
-
-    LOG_INF("--- DIAG-3: all-0x00 buffer write ---");
-    LOG_INF("  Expected: entirely BLACK for ~2 s");
-    fb_clear();
-    fb_flush(disp);
-    k_sleep(K_MSEC(2000));
-
-    LOG_INF("--- Diagnostics done, entering normal loop ---");
-}
-
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int main(void)
 {
-    LOG_INF("=== SSD1309 display test ===");
-
-#if DT_NODE_EXISTS(DT_NODELABEL(pwr_ctrl))
-    /* Verify / re-assert pwr_ctrl. */
-    if (gpio_is_ready_dt(&g_pwr_ctrl)) {
-        int r = gpio_pin_configure_dt(&g_pwr_ctrl, GPIO_OUTPUT_ACTIVE);
-        LOG_INF("pwr_ctrl  P0.30: configure=%d (TPS62740 logic VDD ON)", r);
-    } else {
-        LOG_ERR("pwr_ctrl GPIO not ready in main()!");
-    }
-#endif
-
-#if DT_NODE_EXISTS(DT_NODELABEL(mic2288_mos))
-    /* Verify / re-assert MIC2288 boost enable. */
-    if (gpio_is_ready_dt(&g_mic2288_mos)) {
-        int r = gpio_pin_configure_dt(&g_mic2288_mos, GPIO_OUTPUT_ACTIVE);
-        LOG_INF("mic2288   P0.28: configure=%d (boost ON → 12.6V OLED VCC)", r);
-    } else {
-        LOG_ERR("mic2288_mos GPIO not ready in main()!");
-    }
-#endif
-    k_sleep(K_MSEC(50)); /* extra stabilisation margin */
-
     const struct device *disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+
     if (!device_is_ready(disp)) {
-        LOG_ERR("Display device not ready – check SPI pinctrl and overlay");
+        LOG_ERR("Display not ready");
         return -1;
     }
 
     display_blanking_off(disp);
-    LOG_INF("Display ready, running SPI diagnostics first...");
-    diagnostic_spi_connectivity(disp);
-    LOG_INF("Starting normal display loop");
+    LOG_INF("Display ready");
 
     int frame = 0;
     while (1) {
         screen_hello(disp);
-        LOG_INF("[%d] hello screen", frame++);
         k_sleep(K_MSEC(1500));
 
-        screen_counter(disp, frame);
-        LOG_INF("[%d] counter screen", frame++);
+        screen_counter(disp, frame++);
         k_sleep(K_MSEC(1500));
 
         screen_checkerboard(disp);
-        LOG_INF("[%d] checkerboard", frame++);
         k_sleep(K_MSEC(1000));
 
         screen_stripes(disp);
-        LOG_INF("[%d] stripes", frame++);
         k_sleep(K_MSEC(1000));
     }
 
