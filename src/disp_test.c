@@ -11,12 +11,16 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
 #include <stdio.h>
 
 LOG_MODULE_REGISTER(disp_test, LOG_LEVEL_INF);
+
+#define TMAG_NODE DT_NODELABEL(tmag5170)
 
 /* ── Power rails (POST_KERNEL 10, before display driver at 91) ──────────
  * pwr_ctrl    P0.30 – TPS62740 CTRL: SSD1309 logic VDD
@@ -271,22 +275,114 @@ static void screen_stripes(const struct device *disp)
     fb_flush(disp);
 }
 
+/* Raw SPI access for register diagnostics.
+ * TMAG5170 uses pipelined SPI: RX during transaction N = response to N-1.
+ * Reading a register TWICE gives the actual current value on the 2nd read. */
+#if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
+static const struct spi_dt_spec tmag_spi = SPI_DT_SPEC_GET(
+    TMAG_NODE,
+    SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB | SPI_WORD_SET(8),
+    0);
+
+static uint16_t tmag_read_reg_raw(uint8_t reg)
+{
+    uint8_t tx[4] = { BIT(7) | reg, 0x00, 0x00, 0x00 };
+    uint8_t rx[4] = { 0 };
+    struct spi_buf tx_buf = { .buf = tx, .len = 4 };
+    struct spi_buf rx_buf = { .buf = rx, .len = 4 };
+    struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
+    struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
+
+    /* 1st read: flushes pipeline (gets previous command response) */
+    spi_transceive_dt(&tmag_spi, &tx_set, &rx_set);
+    memset(rx, 0, sizeof(rx));
+    /* 2nd read: gets current register value */
+    spi_transceive_dt(&tmag_spi, &tx_set, &rx_set);
+    return (uint16_t)((rx[1] << 8) | rx[2]);
+}
+#endif
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int main(void)
 {
-    const struct device *disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+    const struct device *disp = DEVICE_DT_GET_OR_NULL(DT_CHOSEN(zephyr_display));
+    bool display_enabled = false;
+#if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
+    const struct device *const tmag = DEVICE_DT_GET(TMAG_NODE);
+    const struct device *const spi_bus = DEVICE_DT_GET(DT_BUS(TMAG_NODE));
+#endif
 
-    if (!device_is_ready(disp)) {
-        LOG_ERR("Display not ready");
-        return -1;
+    if (disp != NULL) {
+        if (device_is_ready(disp)) {
+            display_blanking_off(disp);
+            display_enabled = true;
+            LOG_INF("Display ready");
+        } else {
+            LOG_INF("Display disabled for TMAG-only test");
+        }
+    } else {
+        LOG_INF("No zephyr_display chosen node; running TMAG-only test");
     }
 
-    display_blanking_off(disp);
-    LOG_INF("Display ready");
+#if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
+    LOG_INF("TMAG5170 test start");
+    LOG_INF("TMAG node status: %s", device_is_ready(tmag) ? "ready" : "not ready");
+    LOG_INF("SPI bus for TMAG: %s (%s)", spi_bus->name,
+            device_is_ready(spi_bus) ? "ready" : "not ready");
+
+    if (device_is_ready(tmag)) {
+        uint16_t dev_cfg = tmag_read_reg_raw(0x00);
+        uint16_t sens_cfg = tmag_read_reg_raw(0x01);
+        uint16_t test_cfg = tmag_read_reg_raw(0x0F);
+        LOG_INF("POST-INIT regs: DEVICE_CONFIG=0x%04x (exp 0x0020)  "
+                "SENSOR_CONFIG=0x%04x (exp 0x40C0)  TEST_CONFIG=0x%04x",
+                dev_cfg, sens_cfg, test_cfg);
+    }
+#endif
+
+    uint32_t phase_a_start_ms = k_uptime_get_32();
+    bool phase_b_started = false;
+
+    LOG_INF("A/B test start: PHASE-A=TMAG only (10 s), PHASE-B=%s", display_enabled ? "TMAG+display" : "TMAG only");
 
     int frame = 0;
     while (1) {
+#if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
+        if (device_is_ready(tmag)) {
+            struct sensor_value angle;
+
+            sensor_sample_fetch_chan(tmag, SENSOR_CHAN_ROTATION); /* pipeline flush */
+            int ret = sensor_sample_fetch_chan(tmag, SENSOR_CHAN_ROTATION);
+            if (ret < 0) {
+                LOG_ERR("sample_fetch ROTATION failed: %d", ret);
+            } else {
+                sensor_channel_get(tmag, SENSOR_CHAN_ROTATION, &angle);
+                LOG_INF("angle=%d.%04d deg", angle.val1, angle.val2 / 100);
+            }
+        }
+#endif
+
+        if (!phase_b_started && display_enabled) {
+            if ((k_uptime_get_32() - phase_a_start_ms) >= 10000U) {
+                phase_b_started = true;
+                LOG_INF("PHASE-B start: TMAG+display enabled");
+            } else {
+                /* PHASE-A: no display writes to isolate SPI traffic for TMAG only. */
+                k_sleep(K_SECONDS(1));
+                continue;
+            }
+        } else if (!display_enabled) {
+            /* TMAG-only mode: keep looping sensor reads, no display traffic. */
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
+
+        if (disp == NULL) {
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
+
         screen_hello(disp);
         k_sleep(K_MSEC(1500));
 

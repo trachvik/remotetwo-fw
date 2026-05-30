@@ -5,9 +5,9 @@
  * LFXO  – 32.768 kHz crystal ABS07-32.768KHZ-9-T
  *   internal load capacitors set to 9 pF (= 9000 fF)
  *
- * SPI0  – TMAG5273 magnetic angle sensor  (CS: P1.15)
+ * SPI0  – TMAG5170 magnetic angle sensor  (CS: P1.15)
  *       + SSD1309 OLED display            (CS: P0.02)
- *   SCK  → P0.08   MOSI → P0.10
+ *   SCK  → P0.08   MOSI → P0.10   MISO → P0.09
  *
  * I2C1  – on-board I2C bus (accelerometer, …)
  *   SDA  → P1.02   SCL  → P1.03
@@ -26,11 +26,16 @@
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
 				<NRF_PSEL(SPIM_MOSI, 0, 10)>;
 		};
+		group2 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 9)>;
+			bias-pull-up;
+		};
 	};
 	spi0_sleep: spi0_sleep {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
-				<NRF_PSEL(SPIM_MOSI, 0, 10)>;
+				<NRF_PSEL(SPIM_MOSI, 0, 10)>,
+				<NRF_PSEL(SPIM_MISO, 0, 9)>;
 			low-power-enable;
 		};
 	};
@@ -79,7 +84,7 @@
 };
 
 /* ================================================================
- * SPI0 – TMAG5273 (reg=0) + SSD1309 OLED (reg=1)
+ * SPI0 – TMAG5170 (reg=0) + SSD1309 OLED (reg=1)
  * ================================================================ */
 &spi0 {
 	compatible = "nordic,nrf-spim";
@@ -87,18 +92,20 @@
 	pinctrl-0 = <&spi0_default>;
 	pinctrl-1 = <&spi0_sleep>;
 	pinctrl-names = "default", "sleep";
-	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>,   /* CS_TMAG  – P1.15 */
-		   <&gpio0  2 GPIO_ACTIVE_LOW>;    /* CSn_OLED – P0.02 */
+	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>;   /* CS_TMAG  – P1.15 */
 
-	as5048a: as5048a@0 {
-		compatible = "ams,as5048a";
+	tmag5170: tmag5170@0 {
+		compatible = "ti,tmag5170";
 		reg = <0>;
-		spi-max-frequency = <10000000>;
-		int-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;  /* ALRT_TMAG – P1.00 */
+		spi-max-frequency = <8000000>;
+		operating-mode = <2>;
+		magnetic-channels = "XY";
+		angle-measurement = "XY";
 	};
 
 	ssd1309: ssd1309@1 {
 		compatible = "solomon,ssd1309fb";
+		status = "disabled";
 		reg = <1>;
 		spi-max-frequency = <8000000>;
 		width = <128>;
@@ -267,7 +274,7 @@
 
 	aliases {
 		spi-oled  = &ssd1309;
-		spi-tmag  = &as5048a;
+		spi-tmag  = &tmag5170;
 		motor-drv = &bldc_drv;
 		sw0 = &button_b1;
 		sw1 = &button_b2;
