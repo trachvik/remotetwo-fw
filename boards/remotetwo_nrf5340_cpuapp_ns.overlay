@@ -7,7 +7,7 @@
  *
  * SPI0  – TMAG5273 magnetic angle sensor  (CS: P1.15)
  *       + SSD1309 OLED display            (CS: P0.02)
- *   SCK  → P0.08   MOSI → P0.09   MISO → P0.10
+ *   SCK  → P0.08   MOSI → P0.10
  *
  * I2C1  – on-board I2C bus (accelerometer, …)
  *   SDA  → P1.02   SCL  → P1.03
@@ -24,15 +24,13 @@
 	spi0_default: spi0_default {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
-				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
-				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+				<NRF_PSEL(SPIM_MOSI, 0, 10)>;
 		};
 	};
 	spi0_sleep: spi0_sleep {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
-				<NRF_PSEL(SPIM_MOSI, 0, 9)>,
-				<NRF_PSEL(SPIM_MISO, 0, 10)>;
+				<NRF_PSEL(SPIM_MOSI, 0, 10)>;
 			low-power-enable;
 		};
 	};
