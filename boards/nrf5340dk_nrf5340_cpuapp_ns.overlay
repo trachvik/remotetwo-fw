@@ -91,7 +91,7 @@
 	};
 
 	ssd1309: ssd1309@1 {
-		compatible = "solomon,ssd1306fb";
+		compatible = "solomon,ssd1309fb";
 		reg = <1>;
 		spi-max-frequency = <8000000>;
 		width = <128>;
@@ -102,7 +102,7 @@
 		multiplex-ratio = <63>;
 		segment-remap;
 		com-invdir;
-		prechargep = <0xF1>;
+		prechargep = <0x22>;  /* Phase1=2, Phase2=2 – ext. VCC, no charge pump */
 		reset-gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
 		data-cmd-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;
 	};
