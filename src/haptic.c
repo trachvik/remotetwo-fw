@@ -14,7 +14,7 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 extern void sensor_update(sensor_t *sensor);
 extern float sensor_get_angle(sensor_t *sensor);
 
-#define SUPPLY_VOLTAGE 5.0f
+#define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_OUTPUT_GAIN 2.0f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
 
@@ -36,12 +36,12 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define GESTURE_RELEASE_ZONE   0.09f /* slightly tighter release zone to reset gesture */
 #define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5┬░ ÔÇö no PWM output */
 #define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* blend ramps force 0Ôćĺfull between 0.5┬░ and 2.5┬░ */
-#define HAPTIC_DETENT_AMP_V 1.6f    /* V ÔÇö peak spring voltage in detent mode */
+#define HAPTIC_DETENT_AMP_V 1.0f    /* V — peak spring voltage in detent mode */
 #define DETENT_KV           0.08f   /* V┬Ěs/rad ÔÇö velocity damping, detent mode */
 #define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode Ôćĺ 16 Hz BW */
 #define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz Ôćĺ ¤ä=10 ms; smears encoder LSB steps */
-#define DETENT_IIR_ALPHA    0.30f   /* ¤äÔëł2.8 ms at 1 kHz ÔÇö filters encoder-LSB 1 kHz noise
-                                     * while keeping detent snap feel intact */
+#define DETENT_IIR_ALPHA    0.90f   /* fast response ÔÇö ¤äÔëł1.1 ms at 1 kHz; snap feel */
+                                     /* was 0.30f, increased for snappier detent response */
 
 /* PWM pin definitions removed – hardware fully described in board overlay */
 
@@ -52,9 +52,9 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define MOTOR_INDUCTANCE 0.0001f /* H */
 
 /* AS5048A encoder from devicetree */
-#define AS5048A_NODE DT_NODELABEL(as5048a)
+#define AS5048A_NODE DT_NODELABEL(tmag5170)
 static const struct spi_dt_spec as5048a_spi = SPI_DT_SPEC_GET(AS5048A_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPHA, 0);
-static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw0), gpios, {0});
+static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_NODELABEL(btn_east), gpios, {0});
 
 /* Haptic state variables */
 static float start_angle = 0.0f;
@@ -230,7 +230,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     /* Configure motor parameters */
     motor->voltage_limit = HAPTIC_VOLTAGE_LIMIT;
     motor->velocity_limit = 20.0f;  /* rad/s */
-    //motor->voltage_sensor_align = 3.0f;
+    motor->voltage_sensor_align = 1.5f;
 
     if (!bldc_motor_init(motor))
     {
@@ -576,6 +576,16 @@ void haptic_loop(bldc_motor_t *motor)
 
         detent_v_filt = DETENT_IIR_ALPHA * v_sp + (1.0f - DETENT_IIR_ALPHA) * detent_v_filt;
         target_voltage = detent_v_filt;
+
+        /* Periodic diagnostic: confirm encoder tracking + spring (every 200 ms) */
+        static int det_log_cnt = 0;
+        if (++det_log_cnt >= 200) {
+            det_log_cnt = 0;
+            LOG_INF("det: ang=%.3f cum=%.3f ne=%.3f vsp=%.3f tv=%.3f",
+                    (double)sensor_get_angle(motor->sensor),
+                    (double)cumulative_angle,
+                    (double)norm_err, (double)v_sp, (double)target_voltage);
+        }
     }
 
     /* move() sets target, loop_foc() applies it using fresh electrical angle.

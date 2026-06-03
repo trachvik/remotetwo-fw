@@ -6,7 +6,10 @@ project(remote_two)
 if(CONFIG_APP_DISP_TEST)
     target_sources(app PRIVATE
         src/disp_test.c
+        src/haptic.c
         src/drivers/bldc_driver_3pwm.c
+        src/drivers/bldc_motor.c
+        src/drivers/as5048a.c
     )
 elseif(CONFIG_APP_DRV_TEST)
     target_sources(app PRIVATE

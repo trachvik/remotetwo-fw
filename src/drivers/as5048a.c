@@ -6,6 +6,9 @@
 #include "as5048a.h"
 #include "bldc_motor.h"
 #include <zephyr/logging/log.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/devicetree.h>
 #include <math.h>
 
 LOG_MODULE_REGISTER(as5048a, LOG_LEVEL_INF);
@@ -119,9 +122,16 @@ static float g_cached_angle_rad = 0.0f;
 
 void sensor_update(sensor_t *sensor)
 {
-	/* Read and cache the current angle - call once per control cycle */
-	if (g_as5048a == NULL) return;
-	as5048a_read_angle_rad(g_as5048a, &g_cached_angle_rad);
+	/* Read angle from TMAG5170 via Zephyr sensor API.
+	 * The physical chip on the board is TMAG5170 (not AS5048A).
+	 * SENSOR_CHAN_ROTATION returns angle in degrees. */
+	const struct device *tmag = DEVICE_DT_GET(DT_NODELABEL(tmag5170));
+	struct sensor_value val;
+	if (sensor_sample_fetch_chan(tmag, SENSOR_CHAN_ROTATION) == 0 &&
+	    sensor_channel_get(tmag, SENSOR_CHAN_ROTATION, &val) == 0) {
+		double deg = sensor_value_to_double(&val);
+		g_cached_angle_rad = (float)(deg * M_PI / 180.0);
+	}
 }
 
 float sensor_get_angle(sensor_t *sensor)

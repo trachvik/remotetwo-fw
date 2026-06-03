@@ -18,84 +18,18 @@
 #include <stdio.h>
 #include <math.h>
 
-#include "drivers/bldc_driver_3pwm.h"
+#include "haptic.h"
+#include "drivers/as5048a.h"
 
 LOG_MODULE_REGISTER(disp_test, LOG_LEVEL_INF);
 
-/* ── Motor parameters (3PWM open-loop) ─────────────────────────────────────
- * Source: DRV_test branch — prj_drv.conf + nrf5340dk_nrf5340_cpuapp_drv.overlay */
-#define DRV_PI            3.14159265358979323846f
-#define DRV_2PI           (2.0f * DRV_PI)
-#define POLE_PAIRS        7
-#define VOLTAGE_SUPPLY    3.75f    /* V, actual VM on PCB */
-#define OPEN_LOOP_VOLTAGE 1.5f     /* V, same setpoint as DRV_test */
-#define ALIGN_ITERS       1000U    /* 1000 × 1000 µs = 1 s alignment */
-#define ALIGN_VOLTAGE     1.5f     /* V, same setpoint as DRV_test */
-#define TARGET_VEL_MECH   25.0f    /* rad/s mechanical, same as DRV_test */
-#define LOOP_PERIOD_US    500U     /* 2 kHz control loop, same as DRV_test */
-#define CONTROL_DT        (LOOP_PERIOD_US * 1.0e-6f)
-#define LOG_EVERY_N       2000U    /* ≈ 1 log line/second */
+static bldc_motor_t          g_motor;
+static bldc_driver_3pwm_t    g_driver;
+static struct as5048a_device g_encoder;
+static bool                  g_drv_ready = false;
 
-static bldc_driver_3pwm_t g_drv;
-static float g_shaft_angle = 0.0f;
-static bool  g_drv_ready   = false;
-static bool  g_motor_run   = false;
-
-static inline float drv_norm_angle(float a);
-static void drv_set_phase_voltage(bldc_driver_3pwm_t *drv, float uq, float angle_el);
-
-#define MOTOR_THREAD_STACK_SIZE 1024
-#define MOTOR_THREAD_PRIORITY   K_PRIO_PREEMPT(0)
-K_THREAD_STACK_DEFINE(g_motor_stack, MOTOR_THREAD_STACK_SIZE);
-static struct k_thread g_motor_thread;
-
-static void motor_thread_fn(void *a, void *b, void *c)
-{
-    ARG_UNUSED(a);
-    ARG_UNUSED(b);
-    ARG_UNUSED(c);
-
-    const float vel_elec = TARGET_VEL_MECH * (float)POLE_PAIRS;
-    uint32_t iter = 0U;
-
-    while (g_motor_run) {
-        g_shaft_angle = drv_norm_angle(g_shaft_angle + TARGET_VEL_MECH * CONTROL_DT);
-        const float angle_el = drv_norm_angle(g_shaft_angle * (float)POLE_PAIRS);
-        drv_set_phase_voltage(&g_drv, OPEN_LOOP_VOLTAGE, angle_el);
-
-        if (++iter >= LOG_EVERY_N) {
-            iter = 0U;
-            LOG_INF("shaft=%.3f rad  elec=%.3f rad  w_el=%.1f rad/s  dc=[%.3f %.3f %.3f]",
-                    (double)g_shaft_angle,
-                    (double)angle_el,
-                    (double)vel_elec,
-                    (double)g_drv.dc_a,
-                    (double)g_drv.dc_b,
-                    (double)g_drv.dc_c);
-        }
-
-        k_busy_wait(LOOP_PERIOD_US);
-    }
-}
-
-static inline float drv_norm_angle(float a)
-{
-    float r = fmodf(a, DRV_2PI);
-    return (r < 0.0f) ? r + DRV_2PI : r;
-}
-
-/** Sinusoidal phase voltages — inverse Park + Clarke, centred at Vdc/2.
- *  Matches set_phase_voltage() in DRV_test.c. */
-static void drv_set_phase_voltage(bldc_driver_3pwm_t *drv, float uq, float angle_el)
-{
-    const float mid  = drv->voltage_power_supply * 0.5f;
-    const float u_al = -uq * sinf(angle_el);
-    const float u_be =  uq * cosf(angle_el);
-    bldc_driver_3pwm_set_pwm(drv,
-        mid + u_al,
-        mid + (-u_al * 0.5f + 0.8660254f * u_be),
-        mid + (-u_al * 0.5f - 0.8660254f * u_be));
-}
+/* Used by sensor_update()/sensor_get_angle() wrappers in as5048a.c */
+struct as5048a_device *g_as5048a = &g_encoder;
 
 #define TMAG_NODE DT_NODELABEL(tmag5170)
 
@@ -322,9 +256,9 @@ static void screen_angle(const struct device *disp, const struct sensor_value *a
     /* Motor duty cycle row */
     if (g_drv_ready) {
         snprintf(buf, sizeof(buf), "M:%2d %2d %2d%%",
-                 (int)(g_drv.dc_a * 100.0f),
-                 (int)(g_drv.dc_b * 100.0f),
-                 (int)(g_drv.dc_c * 100.0f));
+                 (int)(g_driver.dc_a * 100.0f),
+                 (int)(g_driver.dc_b * 100.0f),
+                 (int)(g_driver.dc_c * 100.0f));
     } else {
         snprintf(buf, sizeof(buf), "Motor: offline");
     }
@@ -374,39 +308,15 @@ int main(void)
 
     LOG_INF("Display + TMAG ready");
 
-    /* ── DRV8311H motor driver init ─────────────────────────────────────── */
-    bldc_driver_3pwm_init_struct(&g_drv);
-    g_drv.voltage_power_supply = VOLTAGE_SUPPLY;
-    g_drv.voltage_limit        = VOLTAGE_SUPPLY;
-    g_drv.pwm_frequency        = 25000;
-
-    if (bldc_driver_3pwm_init_hw(&g_drv) != DRIVER_INIT_OK) {
-        LOG_ERR("bldc_driver_3pwm_init_hw failed — DRV8311H offline");
-    } else {
-        bldc_driver_3pwm_enable(&g_drv);
+    /* ── Haptic motor init ───────────────────────────────────────────────── */
+    if (haptic_init(&g_motor, (bldc_driver_t *)&g_driver, (sensor_t *)&g_encoder) == 0) {
         g_drv_ready = true;
-        LOG_INF("DRV8311H ready: nSLEEP=HIGH, INL=HIGH");
-
-        /* ── Rotor alignment: hold angle_el=0 for 1 s ──────────────────
-         * Pulls the rotor to a known electrical zero before open-loop spin.
-         * Uses k_busy_wait (interrupts stay enabled — SPI still works). */
-        LOG_INF("Aligning rotor (1 s)...");
-        for (uint32_t i = 0; i < ALIGN_ITERS; ++i) {
-            drv_set_phase_voltage(&g_drv, ALIGN_VOLTAGE, 0.0f);
-            k_busy_wait(1000U);
-        }
-
-        g_motor_run = true;
-        (void)k_thread_create(&g_motor_thread, g_motor_stack,
-                              K_THREAD_STACK_SIZEOF(g_motor_stack),
-                              motor_thread_fn,
-                              NULL, NULL, NULL,
-                              MOTOR_THREAD_PRIORITY, 0, K_NO_WAIT);
-        k_thread_name_set(&g_motor_thread, "motor_ol");
-        LOG_INF("Alignment done, starting open-loop spin");
+        LOG_INF("Haptic ready");
+    } else {
+        LOG_ERR("Haptic init failed");
     }
 
-    LOG_INF("Combined test: TMAG5170 + SSD1309 + DRV8311H");
+    LOG_INF("Combined test: TMAG5170 + SSD1309 + Haptic");
 
     while (1) {
         /* Display and TMAG are serviced every 100 ms in the main thread. */
