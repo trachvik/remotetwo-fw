@@ -1,0 +1,19 @@
+mainmenu "Remote Two firmware"
+
+menu "Application selection"
+
+config APP_DRV_TEST
+	bool "DRV8311H open-loop 3PWM motor driver test"
+	default n
+	help
+	  Builds DRV_test.c + bldc_driver_3pwm only.
+
+config APP_DISP_TEST
+	bool "SSD1309 display communication test"
+	default n
+	help
+	  Builds disp_test.c only – cycles text on the display to verify SPI.
+
+endmenu
+
+source "Kconfig.zephyr"
