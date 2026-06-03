@@ -9,7 +9,7 @@ if(CONFIG_APP_DISP_TEST)
         src/haptic.c
         src/drivers/bldc_driver_3pwm.c
         src/drivers/bldc_motor.c
-        src/drivers/as5048a.c
+        src/drivers/tmag5170_sensor.c
     )
 elseif(CONFIG_APP_DRV_TEST)
     target_sources(app PRIVATE
@@ -23,7 +23,7 @@ else()
         src/haptic.c
         src/remote_control.c
         src/BLE_commands.c
-        src/drivers/as5048a.c
+        src/drivers/tmag5170_sensor.c
         src/drivers/bldc_driver_3pwm.c
         src/drivers/bldc_motor.c
     )

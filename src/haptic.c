@@ -1,6 +1,5 @@
 #include "haptic.h"
-#include "drivers/as5048a.h"
-#include <zephyr/drivers/spi.h>
+#include "drivers/tmag5170_sensor.h"
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
@@ -10,9 +9,7 @@
 
 LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 
-/* Sensor abstraction - implemented in as5048a.c */
-extern void sensor_update(sensor_t *sensor);
-extern float sensor_get_angle(sensor_t *sensor);
+/* Sensor abstraction – implemented in tmag5170_sensor.c */
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_OUTPUT_GAIN 2.0f
@@ -40,7 +37,7 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define DETENT_KV           0.08f   /* V┬Ěs/rad ÔÇö velocity damping, detent mode */
 #define VEL_LPF_ALPHA       0.1f    /* fast vel IIR for detent mode Ôćĺ 16 Hz BW */
 #define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz Ôćĺ ¤ä=10 ms; smears encoder LSB steps */
-#define DETENT_IIR_ALPHA    0.90f   /* fast response ÔÇö ¤äÔëł1.1 ms at 1 kHz; snap feel */
+#define DETENT_IIR_ALPHA    0.30f   /* fast response ÔÇö ¤äÔëł1.1 ms at 1 kHz; snap feel */
                                      /* was 0.30f, increased for snappier detent response */
 
 /* PWM pin definitions removed – hardware fully described in board overlay */
@@ -51,9 +48,6 @@ extern float sensor_get_angle(sensor_t *sensor);
 #define MOTOR_KV_RATING 320.0f  /* rpm/V */
 #define MOTOR_INDUCTANCE 0.0001f /* H */
 
-/* AS5048A encoder from devicetree */
-#define AS5048A_NODE DT_NODELABEL(tmag5170)
-static const struct spi_dt_spec as5048a_spi = SPI_DT_SPEC_GET(AS5048A_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPHA, 0);
 static const struct gpio_dt_spec user_button = GPIO_DT_SPEC_GET_OR(DT_NODELABEL(btn_east), gpios, {0});
 
 /* Haptic state variables */
@@ -186,16 +180,16 @@ int haptic_update_num_steps_from_button(void)
 int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 {
     bldc_driver_3pwm_t *driver_3pwm = (bldc_driver_3pwm_t *)driver;
-    struct as5048a_device *as5048a = (struct as5048a_device *)encoder;
+    struct tmag5170_device *tmag = (struct tmag5170_device *)encoder;
 
-    /* Initialize AS5048A encoder */
-    LOG_INF("1. Initializing AS5048A encoder...");
-    if (as5048a_init(as5048a, &as5048a_spi) < 0)
+    /* Initialize TMAG5170 encoder */
+    LOG_INF("1. Initializing TMAG5170 encoder...");
+    if (tmag5170_init(tmag) < 0)
     {
-        LOG_ERR("   Failed to initialize AS5048A");
+        LOG_ERR("   Failed to initialize TMAG5170");
         //return -1;
     }
-    LOG_INF("   [OK] AS5048A ready");
+    LOG_INF("   [OK] TMAG5170 ready");
 
     /* Initialize DRV8311H 3PWM Driver */
     LOG_INF("2. Initializing DRV8311H 3PWM driver...");
@@ -224,7 +218,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     /* Link driver to motor */
     bldc_motor_link_driver(motor, driver);
 
-    /* Link sensor to motor - use dummy pointer, actual access via g_as5048a */
+    /* Link sensor to motor */
     bldc_motor_link_sensor(motor, encoder);
 
     /* Configure motor parameters */
@@ -291,24 +285,19 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     k_msleep(500);
     
     /* Store start angle for relative position calculation */
-    uint16_t startup_raw = 0;
-    if (as5048a_read_raw(as5048a, &startup_raw) == 0) {
-        start_angle = ((float)startup_raw / 16384.0f) * _2PI;
-        LOG_INF("Encoder startup_raw = %u, angle = %.2f deg",
-                startup_raw, (double)(start_angle * 180.0f / 3.14159f));
-    } else {
-        LOG_ERR("Failed to read encoder startup angle!");
-        start_angle = 0.0f;
-    }
+    sensor_update(encoder);
+    start_angle = sensor_get_angle(encoder);
+    LOG_INF("Encoder startup angle = %.2f deg",
+            (double)(start_angle * 180.0f / 3.14159f));
 
     /* Encoder diagnostic: read 5 samples */
     LOG_INF("Encoder diagnostic (5 samples):");
     for (int i = 0; i < 5; i++) {
-        uint16_t raw = 0;
-        int ret = as5048a_read_raw(as5048a, &raw);
-        LOG_INF("  [%d] ret=%d raw=%u angle=%.2f deg",
-                i, ret, raw, (double)(((float)raw / 16384.0f) * 360.0f));
         k_msleep(100);
+        sensor_update(encoder);
+        float angle_rad = sensor_get_angle(encoder);
+        LOG_INF("  [%d] angle=%.2f deg",
+                i, (double)(angle_rad * 180.0f / 3.14159f));
     }
 
     num_steps_old = 0;

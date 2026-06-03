@@ -2,18 +2,15 @@
 #include <zephyr/logging/log.h>
 #include "haptic.h"
 #include "remote_control.h"
-#include "drivers/as5048a.h"
+#include "drivers/tmag5170_sensor.h"
 #include "ui_display.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 /* Device instances */
-static struct as5048a_device encoder;
+static struct tmag5170_device encoder;
 static bldc_driver_3pwm_t driver;
 static bldc_motor_t motor;
-
-/* Global pointer for sensor wrapper */
-struct as5048a_device *g_as5048a = &encoder;
 
 int main(void)
 {

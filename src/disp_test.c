@@ -19,17 +19,14 @@
 #include <math.h>
 
 #include "haptic.h"
-#include "drivers/as5048a.h"
+#include "drivers/tmag5170_sensor.h"
 
 LOG_MODULE_REGISTER(disp_test, LOG_LEVEL_INF);
 
 static bldc_motor_t          g_motor;
 static bldc_driver_3pwm_t    g_driver;
-static struct as5048a_device g_encoder;
+static struct tmag5170_device g_encoder;
 static bool                  g_drv_ready = false;
-
-/* Used by sensor_update()/sensor_get_angle() wrappers in as5048a.c */
-struct as5048a_device *g_as5048a = &g_encoder;
 
 #define TMAG_NODE DT_NODELABEL(tmag5170)
 
