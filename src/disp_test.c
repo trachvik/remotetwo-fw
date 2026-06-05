@@ -7,6 +7,9 @@
  *     "-DCONF_FILE=prj_disp.conf"
  */
 
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/drivers/uart.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
@@ -284,6 +287,25 @@ static void screen_angle(const struct device *disp, const struct sensor_value *a
 
 int main(void)
 {
+    /* TOTO ZAVOLEJ ÚPLNĚ JAKO PRVNÍ V MAINU */
+    if (usb_enable(NULL) != 0) {
+        LOG_ERR("Failed to enable USB");
+        return 0;
+    }
+
+    /* Volitelně: Počkat, dokud se nepřipojí terminál (např. PuTTY/TeraTerm)
+     * Abys nepřišel o úplně první logy po restartu. */
+    const struct device *dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+    uint32_t dtr = 0;
+    while (!dtr) {
+        uart_line_ctrl_get(dev, UART_LINE_CTRL_DTR, &dtr);
+        k_sleep(K_MSEC(100));
+    }
+
+    LOG_INF("USB Console Connected! Welcome to Remote Two.");
+    
+    // ... tvůj stávající kód ...
+
     const struct device *disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 #if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
     const struct device *const tmag = DEVICE_DT_GET(TMAG_NODE);

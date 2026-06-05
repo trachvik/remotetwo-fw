@@ -19,6 +19,27 @@
  *   INL → P0.18
  */
 
+ /* Define main console - USB */
+/ {
+    chosen {
+        zephyr,console = &cdc_acm_uart0;
+        zephyr,shell = &cdc_acm_uart0;
+		zephyr,uart-mcumgr = &cdc_acm_uart0;
+    };
+};
+
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+        label = "CDC_ACM_0";
+    };
+};
+
+/* Vypnuti hardwaroveho UARTu 0, protoze jeho registry potřebuje naše SPI sběrnice */
+&uart0 {
+    status = "disabled";
+};
+
 &pinctrl {
 	/* ---- SPI0: TMAG5170 + SSD1309 OLED ---- */
 	spi0_default: spi0_default {
@@ -186,7 +207,7 @@
 			label = "B6";
 			zephyr,code = <INPUT_KEY_6>;
 		};
-		button_b7: button_b7 {
+		button_boot: button_boot {
 			gpios = <&gpio0 19 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "B7";
 			zephyr,code = <INPUT_KEY_7>;
@@ -282,7 +303,7 @@
 		sw3 = &button_b4;
 		sw4 = &button_b5;
 		sw5 = &button_b6;
-		sw6 = &button_b7;
-		sw7 = &button_b8;
+		mcuboot-button0 = &button_boot;
+		sw6 = &button_b8;
 	};
 };

@@ -1,5 +1,12 @@
 RTT serial number: 1050069428
 west flash --runner nrfjprog
 
+mcumgr --conntype serial --connstring dev=COM17,baud=115200,mtu=512 image upload "C:\Projekt\RemoteTwo\remotetwo-fw\build_usb\remotetwo-fw\zephyr\zephyr.signed.bin"
 
-"Haptic gesture" still does not work, it ignores it completely
+mcumgr --conntype serial --connstring dev=COM17,baud=115200,mtu=512 image list
+
+mcumgr --conntype serial --connstring dev=COM17,baud=115200,mtu=512 image test <HASH>
+
+mcumgr --conntype serial --connstring dev=COM17,baud=115200,mtu=512 reset
+
+mcumgr --conntype serial --connstring dev=COM17,baud=115200,mtu=512 image confirm

@@ -1,0 +1,25 @@
+mcuboot:
+  address: 0x0
+  size: 0x12000
+  region: flash_primary
+
+mcuboot_pad:
+  address: 0x12000
+  size: 0x200
+  region: flash_primary
+
+mcuboot_primary:
+  address: 0x12000
+  size: 0x72000
+  region: flash_primary
+  span: [mcuboot_pad, app]
+
+mcuboot_secondary:
+  address: 0x84000
+  size: 0x72000
+  region: flash_primary
+
+EMPTY_0:
+  address: 0xf6000
+  size: 0xa000
+  region: flash_primary
