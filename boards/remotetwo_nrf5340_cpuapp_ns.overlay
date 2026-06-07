@@ -40,6 +40,31 @@
     status = "disabled";
 };
 
+/*
+ * nrf5340dk_nrf5340_cpuapp_ns.overlay je auto-načítán Zephyrem pro tento board.
+ * Musíme potlačit několik výchozích nastavení DK:
+ *   - pwm1 disabled: uvolní P1.15 pro SPI0 CS TMAG5170 (jinak TMAG vždy vrací 0)
+ *   - qspi disabled: QSPI používá piny P0.13–P0.18; P0.18 = INL motoru → konflikt
+ *   - delete button_0..3: DK má 4 výchozí tlačítka + naše 8 = 12 GPIOTE kanálů,
+ *     ale nRF5340 jich má jen 8 → -ENOMEM; smažeme všechny DK tlačítka
+ */
+&pwm1 {
+    status = "disabled";
+};
+
+&qspi {
+    status = "disabled";
+};
+
+/ {
+    buttons {
+        /delete-node/ button_0;
+        /delete-node/ button_1;
+        /delete-node/ button_2;
+        /delete-node/ button_3;
+    };
+};
+
 &pinctrl {
 	/* ---- SPI0: TMAG5170 + SSD1309 OLED ---- */
 	spi0_default: spi0_default {
@@ -123,6 +148,13 @@
 		operating-mode = <2>;
 		magnetic-channels = "XY";
 		angle-measurement = "XY";
+		/* Noise reduction: 32x hardware oversampling => ~sqrt(32) ≈ 5.7x less
+		 * angle noise. Default oversampling=1 (chip reset) gave ~8 deg p-p. */
+		oversampling = <32>;
+		/* Field is only ~3 mT, the default ±50/150 mT range wastes ADC bits.
+		 * 1 = ±25 mT (A1) / ±75 mT (A2) => doubles angular resolution. */
+		x-range = <1>;
+		y-range = <1>;
 	};
 
 	ssd1309: ssd1309@1 {
@@ -208,11 +240,11 @@
 			zephyr,code = <INPUT_KEY_6>;
 		};
 		button_boot: button_boot {
-			gpios = <&gpio0 19 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			gpios = <&gpio0 21 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "B7";
 			zephyr,code = <INPUT_KEY_7>;
 		};
-		button_b8: button_b8 {
+		button_b8: btn_east: button_b8 {
 			gpios = <&gpio1  4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "B8";
 			zephyr,code = <INPUT_KEY_8>;

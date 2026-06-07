@@ -1,11 +1,14 @@
 #include "haptic.h"
 #include "drivers/tmag5170_sensor.h"
+#include "drivers/bldc_driver_3pwm.h"
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
 #include <math.h>
 #include <arm_math.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 
@@ -80,6 +83,43 @@ static bool detent_nudge_fired = false;
 static bldc_motor_t *g_motor_ptr = NULL;
 static K_SEM_DEFINE(haptic_sem, 0, 1);
 static struct k_timer haptic_timer;
+
+/* True only after FOC calibration succeeded. When false the haptic loop still
+ * runs (so the step-count button keeps working) but applies no motor torque. */
+static bool g_motor_calibrated = false;
+
+/* ── Diagnostic line buffer ──────────────────────────────────────────────
+ * USB-CDC drops bursts of log lines, so haptic_init() stores diagnostic text
+ * here and the slow main loop drains it one line per iteration. */
+#define HAPTIC_DIAG_MAX_LINES 24
+#define HAPTIC_DIAG_LINE_LEN  80
+static char g_diag[HAPTIC_DIAG_MAX_LINES][HAPTIC_DIAG_LINE_LEN];
+static volatile int g_diag_count = 0;
+
+static void diag_addf(const char *fmt, ...)
+{
+    if (g_diag_count >= HAPTIC_DIAG_MAX_LINES) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_diag[g_diag_count], HAPTIC_DIAG_LINE_LEN, fmt, ap);
+    va_end(ap);
+    g_diag_count++;
+}
+
+int haptic_diag_count(void)
+{
+    return g_diag_count;
+}
+
+const char *haptic_diag_get_line(int idx)
+{
+    if (idx < 0 || idx >= g_diag_count) {
+        return "";
+    }
+    return g_diag[idx];
+}
 
 #define HAPTIC_THREAD_STACK_SIZE 4096
 #define HAPTIC_THREAD_PRIORITY   0  /* Highest preemptible ÔÇö safe at 1 kHz */
@@ -187,7 +227,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     if (tmag5170_init(tmag) < 0)
     {
         LOG_ERR("   Failed to initialize TMAG5170");
-        //return -1;
+        return -1;
     }
     LOG_INF("   [OK] TMAG5170 ready");
 
@@ -203,8 +243,10 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     if (bldc_driver_3pwm_init_hw(driver_3pwm) != DRIVER_INIT_OK)
     {
         LOG_ERR("   Failed to initialize driver");
-        //return -1;
+        return -1;
     }
+    /* Match DRV_test exactly: enable the driver (zeros duties, bridge active). */
+    bldc_driver_3pwm_enable(driver_3pwm);
     LOG_INF("   [OK] Driver initialized");
 
     /* Initialize BLDC Motor */
@@ -229,41 +271,153 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     if (!bldc_motor_init(motor))
     {
         LOG_ERR("   Failed to initialize motor");
-        //return -1;
+        return -1;
     }
     LOG_INF("   [OK] Motor initialized");
 
-    /* Run FOC calibration */
-    LOG_INF("4. Running FOC calibration...");
-    LOG_INF("   This will align sensor and motor phases");
+    /* ── DIAGNOSTIC: open-loop spin probe (EXACT DRV_test math) ──────────
+     * DRV_test build spins this motor; disp_test build does not. The driver
+     * code (bldc_driver_3pwm.c) is byte-for-byte identical between builds, so
+     * this probe runs the SAME open-loop sequence here, in the disp_test
+     * build, and uses the now-clean encoder (oversampling=32) to measure
+     * whether the rotor ACTUALLY moves.
+     *
+     * USB-CDC immediate logging DROPS lines emitted inside tight loops, so we
+     * capture snapshots into arrays and store the results in the diag buffer,
+     * which the slow disp_test main loop drains one line per iteration.
+     * ─────────────────────────────────────────────────────────────────── */
+    {
+        bldc_driver_3pwm_t *d = driver_3pwm;
+        const float vdc   = d->voltage_power_supply;
+        const float mid   = vdc * 0.5f;
+        const float uq    = 1.5f;                 /* same as DRV_test          */
+        const int   pp    = MOTOR_POLE_PAIRS;
+
+        /* DRV8311H pin states BEFORE driving (captured, logged after). */
+        int nf0 = -1, ns0 = -1, inl0 = -1;
+        bldc_driver_3pwm_get_status(&nf0, &ns0, &inl0);
+
+        /* ── Two-point open-loop ALIGN torque test ───────────────────────
+         * Independent of calibration AND immune to "spin slip": we HOLD full
+         * uq at a FIXED electrical angle. If phase current flows, the rotor is
+         * forced to the alignment pose. Stepping el by 180° elec must move the
+         * rotor by 180/pp degrees mechanical (~16.4° for pp=11). A rotor that
+         * receives no current cannot move at all. Three holds: 0°, 180°, 0°
+         * so we see the rotor jump out and snap back. ── */
+        #define ALIGN_HOLD_MS 1400
+        float a_hold[3];
+        const float el_hold[3] = { 0.0f, 3.14159265f, 0.0f };
+
+        for (int h = 0; h < 3; h++) {
+            float el = el_hold[h];
+            float u_al = -uq * sinf(el);
+            float u_be =  uq * cosf(el);
+            float ua = mid + u_al;
+            float ub = mid + (-u_al * 0.5f + 0.8660254f * u_be);
+            float uc = mid + (-u_al * 0.5f - 0.8660254f * u_be);
+            /* Hold the SAME fixed vector for the whole window (no rotation). */
+            for (int t = 0; t < ALIGN_HOLD_MS; t++) {
+                bldc_driver_3pwm_set_pwm(d, ua, ub, uc);
+                k_msleep(1);
+            }
+            sensor_update(motor->sensor);
+            a_hold[h] = sensor_get_angle(motor->sensor) * 180.0f / 3.14159f;
+        }
+
+        bldc_driver_3pwm_set_pwm(d, 0.0f, 0.0f, 0.0f);
+
+        float d01 = a_hold[1] - a_hold[0];
+        while (d01 >  180.0f) d01 -= 360.0f;
+        while (d01 < -180.0f) d01 += 360.0f;
+        float d12 = a_hold[2] - a_hold[1];
+        while (d12 >  180.0f) d12 -= 360.0f;
+        while (d12 < -180.0f) d12 += 360.0f;
+        float expected = 180.0f / (float)pp;   /* mechanical deg for 180° elec */
+
+        /* ── Dump via printk() DIRECTLY, here in haptic_init, BEFORE the
+         *    haptic thread is started. At this point NOTHING else logs
+         *    (the thread isn't running and the disp_test main loop is
+         *    blocked waiting for haptic_init to return), so the USB-CDC TX
+         *    buffer is free and printk (CONFIG_LOG_PRINTK=n => uart_poll_out,
+         *    blocking) is never dropped. k_msleep paces each line so the USB
+         *    stack flushes. ── */
+        k_msleep(60);
+        printk("\n===== OL-ALIGN TORQUE TEST =====\n");
+        k_msleep(60);
+        printk("pins: nFAULT=%d(1=OK) nSLEEP=%d(1=awake) INL=%d(1=on)\n",
+               nf0, ns0, inl0);
+        k_msleep(60);
+        printk("vdc=%d.%02d uq=1.50 pp=%d  hold each el for %d ms\n",
+               (int)vdc, (int)((vdc - (int)vdc) * 100), pp, ALIGN_HOLD_MS);
+        for (int h = 0; h < 3; h++) {
+            k_msleep(60);
+            printk("hold[%d] el=%s : angle=%4d.%02d deg\n", h,
+                   (h == 1) ? "180" : "  0",
+                   (int)a_hold[h], (int)(fabsf(a_hold[h] - (int)a_hold[h]) * 100));
+        }
+        k_msleep(60);
+        printk("delta 0->180 = %d.%02d deg   180->0 = %d.%02d deg  (expect ~%d.%02d)\n",
+               (int)d01, (int)(fabsf(d01 - (int)d01) * 100),
+               (int)d12, (int)(fabsf(d12 - (int)d12) * 100),
+               (int)expected, (int)(fabsf(expected - (int)expected) * 100));
+        k_msleep(60);
+        if (fabsf(d01) < 4.0f && fabsf(d12) < 4.0f) {
+            printk("VERDICT: NO torque - rotor did not move to either pole.\n");
+            printk("  PWM duties OK + nFAULT=1 => NO phase current.\n");
+            printk("  => check VM rail at the bridge, phase wiring, motor windings.\n");
+        } else {
+            printk("VERDICT: rotor MOVED => phase current OK, motor+driver+VM fine.\n");
+            printk("  => problem is the FOC calibration / zero_electric_angle, not HW.\n");
+        }
+        k_msleep(60);
+        printk("================================\n\n");
+        #undef ALIGN_HOLD_MS
+    }
+
+    /* ── FOC calibration – proven method from commit b63d36e ─────────────
+     * Restored from the last commit where haptics + display worked together.
+     * Instead of SimpleFOC alignSensor() (which detects direction by moving
+     * the rotor a large amount — fragile here), we:
+     *   1. Hard-set sensor_direction = CW (this motor's known wiring).
+     *   2. Ramp voltage 0 -> voltage_sensor_align at a FIXED electrical angle
+     *      3*PI/2, which firmly grabs/aligns the rotor.
+     *   3. Read zero_electric_angle straight from the encoder at that pose.
+     *   4. Call bldc_motor_init_foc(), which now SKIPS both internal sweeps
+     *      because direction is known and zero_electric_angle is set.
+     * This is robust to encoder noise and does not require large free motion.
+     * ─────────────────────────────────────────────────────────────────── */
+    LOG_INF("4. Running FOC calibration (b63d36e ramp-at-3pi/2 method)...");
     LOG_INF("   Motor will move slightly during calibration");
     k_msleep(1000);
 
-    /* Inline zero-electric-angle measurement: ramp up voltage at 3pi/2,
-     * hold, read encoder. Same call depth as the working settle loop below
-     * (avoids stack overflow that hung inside bldc_motor_init_foc). */
-    motor->sensor_direction = DIR_CW;
-    motor->zero_electric_angle = 0.0f;  /* clear offset before measurement */
+    motor->sensor_direction    = DIR_CW;
+    motor->zero_electric_angle = 0.0f;   /* clear offset before measurement */
     LOG_INF("   Aligning rotor at 3pi/2...");
     for (int i = 0; i <= 50; i++) {
         float v = motor->voltage_sensor_align * (float)i / 50.0f;
         bldc_motor_set_phase_voltage(motor, v, 0.0f, 4.71239f); /* _3PI_2 */
         k_msleep(1);
     }
-    k_msleep(700);  /* let rotor settle */
+    k_msleep(700);   /* let rotor settle */
     sensor_update(motor->sensor);
     motor->zero_electric_angle = bldc_motor_electrical_angle(motor);
     bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
     k_msleep(100);
-    LOG_INF("   zero_electric_angle = %.4f rad", (double)motor->zero_electric_angle);
+    LOG_INF("   zero_electric_angle = %.4f rad",
+            (double)motor->zero_electric_angle);
 
-    /* bldc_motor_init_foc will now skip both loops (dir=CW, zero_el set) */
-    if (!bldc_motor_init_foc(motor))
-    {
-        LOG_ERR("   FOC calibration failed");
+    /* init_foc now skips both loops (dir=CW, zero_electric_angle set). */
+    if (bldc_motor_init_foc(motor) != 1) {
+        LOG_ERR("   FOC calibration FAILED.");
         LOG_ERR("   Motor status: %d", motor->motor_status);
-        //return -1;
+        LOG_WRN("   Continuing WITHOUT motor torque so the step button works.");
+        bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
+        g_motor_calibrated = false;
+        goto start_haptic_thread;
     }
+
+    /* Motor is READY (bldc_motor_init_foc set motor_status = MOTOR_READY). */
+    g_motor_calibrated = true;
     LOG_INF("   [OK] FOC calibration complete!");
 
     LOG_INF("================================================");
@@ -306,6 +460,10 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     k_msleep(2000);
 
     /* Start 10 kHz (100 ┬Ás) FOC control loop */
+start_haptic_thread:
+    if (!g_motor_calibrated) {
+        LOG_WRN("Haptic loop starting in BUTTON-ONLY mode (no motor torque).");
+    }
     g_motor_ptr = motor;
     /* DEBUG: timer/thread disabled, haptic_loop called from main */
     k_timer_init(&haptic_timer, haptic_timer_cb, NULL);
@@ -326,6 +484,13 @@ void haptic_loop(bldc_motor_t *motor)
         num_steps = g_num_steps_override;
     }
     g_num_steps_current = num_steps;
+
+    /* If FOC calibration failed, run in button-only mode: the step button is
+     * already polled above; apply no motor torque and skip the FOC path. */
+    if (!g_motor_calibrated) {
+        bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
+        return;
+    }
 
     sensor_update(motor->sensor);
     float current_angle = sensor_get_angle(motor->sensor);
@@ -578,7 +743,21 @@ void haptic_loop(bldc_motor_t *motor)
     }
 
     /* move() sets target, loop_foc() applies it using fresh electrical angle.
-     * Order MUST be: move Ôćĺ loop_foc  (SimpleFOC contract). */
+     * Order MUST be: move → loop_foc  (SimpleFOC contract). */
     bldc_motor_move(motor, target_voltage);
     bldc_motor_loop_foc(motor);
+
+    /* PWM diagnostic: log ua/ub/uc every 1000 iterations (~1s) */
+    static int pwm_log_cnt = 0;
+    if (++pwm_log_cnt >= 1000) {
+        pwm_log_cnt = 0;
+        bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)motor->driver;
+        LOG_INF("PWM diag: enabled=%d tv=%.3f ua=%.3f ub=%.3f uc=%.3f dc=[%.3f %.3f %.3f]",
+                motor->enabled,
+                (double)target_voltage,
+                (double)motor->ua, (double)motor->ub, (double)motor->uc,
+                drv ? (double)drv->dc_a : 0.0,
+                drv ? (double)drv->dc_b : 0.0,
+                drv ? (double)drv->dc_c : 0.0);
+    }
 }

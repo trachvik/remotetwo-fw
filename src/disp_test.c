@@ -287,19 +287,22 @@ static void screen_angle(const struct device *disp, const struct sensor_value *a
 
 int main(void)
 {
-    /* TOTO ZAVOLEJ ÚPLNĚ JAKO PRVNÍ V MAINU */
-    if (usb_enable(NULL) != 0) {
-        LOG_ERR("Failed to enable USB");
-        return 0;
+    /* USB: inicializuj jen pokud to INITIALIZE_AT_BOOT neudělal automaticky */
+    if (!IS_ENABLED(CONFIG_USB_DEVICE_INITIALIZE_AT_BOOT)) {
+        if (usb_enable(NULL) != 0) {
+            LOG_ERR("Failed to enable USB");
+            return 0;
+        }
     }
 
-    /* Volitelně: Počkat, dokud se nepřipojí terminál (např. PuTTY/TeraTerm)
-     * Abys nepřišel o úplně první logy po restartu. */
+    /* Počkat max 3 s na připojení terminálu – nesmí blokovat mcumgr navždy */
     const struct device *dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-    uint32_t dtr = 0;
-    while (!dtr) {
-        uart_line_ctrl_get(dev, UART_LINE_CTRL_DTR, &dtr);
-        k_sleep(K_MSEC(100));
+    if (IS_ENABLED(CONFIG_UART_LINE_CTRL)) {
+        uint32_t dtr = 0;
+        for (int i = 0; i < 120 && !dtr; i++) {
+            uart_line_ctrl_get(dev, UART_LINE_CTRL_DTR, &dtr);
+            k_sleep(K_MSEC(25));
+        }
     }
 
     LOG_INF("USB Console Connected! Welcome to Remote Two.");
@@ -338,11 +341,21 @@ int main(void)
     LOG_INF("Combined test: TMAG5170 + SSD1309 + Haptic");
 
     while (1) {
+        /* Drain the haptic diagnostic buffer ONE line per iteration.
+         * haptic_init() captures the open-loop torque probe results here
+         * because USB-CDC drops fast bursts; the slow 100 ms loop prints
+         * them reliably. */
+        static int diag_printed = 0;
+        if (diag_printed < haptic_diag_count()) {
+            LOG_INF("%s", haptic_diag_get_line(diag_printed));
+            diag_printed++;
+        }
+
         /* Display and TMAG are serviced every 100 ms in the main thread. */
 #if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
         struct sensor_value angle;
 
-        int ret = sensor_sample_fetch_chan(tmag, SENSOR_CHAN_ROTATION);
+        int ret = sensor_sample_fetch(tmag);
         if (ret < 0) {
             LOG_ERR("TMAG sample fetch failed: %d", ret);
         } else {
@@ -350,6 +363,11 @@ int main(void)
             if (ret < 0) {
                 LOG_ERR("TMAG channel get failed: %d", ret);
             } else {
+                static int log_ctr;
+                if ((log_ctr++ % 20) == 0) {
+                    LOG_INF("TMAG angle: %d.%06d deg",
+                            angle.val1, abs(angle.val2));
+                }
                 screen_angle(disp, &angle);
             }
         }

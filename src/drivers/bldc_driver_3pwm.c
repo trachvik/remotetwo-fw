@@ -47,9 +47,18 @@ static void write_duty_cycles(uint32_t period_ns, float dc_a, float dc_b, float 
     uint32_t pb = (uint32_t)(_CONSTRAIN(dc_b, 0.0f, 1.0f) * (float)period_ns);
     uint32_t pc = (uint32_t)(_CONSTRAIN(dc_c, 0.0f, 1.0f) * (float)period_ns);
 
-    pwm_set_dt(&pwm_ina, period_ns, pa);
-    pwm_set_dt(&pwm_inb, period_ns, pb);
-    pwm_set_dt(&pwm_inc, period_ns, pc);
+    int r0 = pwm_set_dt(&pwm_ina, period_ns, pa);
+    int r1 = pwm_set_dt(&pwm_inb, period_ns, pb);
+    int r2 = pwm_set_dt(&pwm_inc, period_ns, pc);
+
+    if (r0 || r1 || r2) {
+        static bool logged_once = false;
+        if (!logged_once) {
+            logged_once = true;
+            LOG_ERR("pwm_set_dt failed: INA=%d INB=%d INC=%d (period=%u)",
+                    r0, r1, r2, period_ns);
+        }
+    }
 }
 
 /* Cached period so set_pwm doesn't recompute every call */
@@ -105,7 +114,10 @@ int bldc_driver_3pwm_init_hw(bldc_driver_3pwm_t *driver)
         LOG_ERR("nSLEEP GPIO not ready");
         return DRIVER_INIT_FAILED;
     }
-    gpio_pin_configure_dt(&gpio_sleep, GPIO_OUTPUT_INACTIVE | GPIO_INPUT);
+    if (gpio_pin_configure_dt(&gpio_sleep, GPIO_OUTPUT_INACTIVE | GPIO_INPUT) != 0) {
+        LOG_ERR("Failed to configure nSLEEP as output");
+        return DRIVER_INIT_FAILED;
+    }
     k_sleep(K_MSEC(2));
     gpio_pin_set_dt(&gpio_sleep, 1);
     k_sleep(K_MSEC(5));
@@ -116,7 +128,10 @@ int bldc_driver_3pwm_init_hw(bldc_driver_3pwm_t *driver)
         LOG_ERR("INL GPIO not ready");
         return DRIVER_INIT_FAILED;
     }
-    gpio_pin_configure_dt(&gpio_inl, GPIO_OUTPUT_ACTIVE | GPIO_INPUT);
+    if (gpio_pin_configure_dt(&gpio_inl, GPIO_OUTPUT_ACTIVE | GPIO_INPUT) != 0) {
+        LOG_ERR("Failed to configure INL as output");
+        return DRIVER_INIT_FAILED;
+    }
 
     /* Configure nFAULT – input with interrupt on falling edge (fault asserted) */
     if (!gpio_is_ready_dt(&gpio_fault)) {
@@ -199,4 +214,50 @@ void bldc_driver_3pwm_set_pwm(bldc_driver_3pwm_t *driver,
     driver->dc_c = uc / driver->voltage_power_supply;
 
     write_duty_cycles(g_period_ns, driver->dc_a, driver->dc_b, driver->dc_c);
+}
+
+void bldc_driver_3pwm_get_status(int *nfault, int *nsleep, int *inl)
+{
+    if (nfault) {
+        *nfault = gpio_is_ready_dt(&gpio_fault)
+                      ? gpio_pin_get_raw(gpio_fault.port, gpio_fault.pin) : -1;
+    }
+    if (nsleep) {
+        *nsleep = gpio_is_ready_dt(&gpio_sleep)
+                      ? gpio_pin_get_raw(gpio_sleep.port, gpio_sleep.pin) : -1;
+    }
+    if (inl) {
+        *inl = gpio_is_ready_dt(&gpio_inl)
+                   ? gpio_pin_get_raw(gpio_inl.port, gpio_inl.pin) : -1;
+    }
+}
+
+int bldc_driver_3pwm_reassert_enable(int *nsleep_after, int *inl_after,
+                                     int *sleep_cfg_rc, int *inl_cfg_rc,
+                                     int *sleep_set_rc)
+{
+    int rc_cfg_s = -100, rc_cfg_i = -100, rc_set_s = -100;
+
+    if (gpio_is_ready_dt(&gpio_inl)) {
+        rc_cfg_i = gpio_pin_configure_dt(&gpio_inl, GPIO_OUTPUT_ACTIVE);
+    }
+    if (gpio_is_ready_dt(&gpio_sleep)) {
+        rc_cfg_s = gpio_pin_configure_dt(&gpio_sleep, GPIO_OUTPUT_ACTIVE);
+        rc_set_s = gpio_pin_set_dt(&gpio_sleep, 1);
+    }
+
+    k_busy_wait(2000U); /* let the pin settle / DRV wake */
+
+    if (inl_cfg_rc)   *inl_cfg_rc   = rc_cfg_i;
+    if (sleep_cfg_rc) *sleep_cfg_rc = rc_cfg_s;
+    if (sleep_set_rc) *sleep_set_rc = rc_set_s;
+    if (nsleep_after) {
+        *nsleep_after = gpio_is_ready_dt(&gpio_sleep)
+                          ? gpio_pin_get_raw(gpio_sleep.port, gpio_sleep.pin) : -1;
+    }
+    if (inl_after) {
+        *inl_after = gpio_is_ready_dt(&gpio_inl)
+                       ? gpio_pin_get_raw(gpio_inl.port, gpio_inl.pin) : -1;
+    }
+    return (rc_cfg_i == 0 && rc_cfg_s == 0 && rc_set_s == 0) ? 0 : -1;
 }

@@ -80,4 +80,27 @@ void bldc_driver_3pwm_disable(bldc_driver_3pwm_t *driver);
 void bldc_driver_3pwm_set_pwm(bldc_driver_3pwm_t *driver,
                                float ua, float ub, float uc);
 
+/**
+ * Read the raw logic levels of the DRV8311H status pins.
+ * Any output pointer may be NULL. A value of -1 means the pin is not ready.
+ *
+ * @param nfault  nFAULT raw level (1=HIGH=OK, 0=LOW=fault asserted).
+ * @param nsleep  nSLEEP raw level (1=HIGH=awake).
+ * @param inl     INL raw level (1=HIGH=low-side bridge enabled).
+ */
+void bldc_driver_3pwm_get_status(int *nfault, int *nsleep, int *inl);
+
+/**
+ * Force-reassert the DRV8311H enable pins (INL HIGH, nSLEEP HIGH) and read
+ * back the raw levels, returning the GPIO API return codes. Diagnostic helper
+ * to distinguish "GPIO write does not take effect" (e.g. SPU/secure-domain or
+ * pin-mux conflict) from "something else resets the pins after init".
+ *
+ * Any output pointer may be NULL.
+ * @return 0 if all GPIO calls returned 0, -1 otherwise.
+ */
+int bldc_driver_3pwm_reassert_enable(int *nsleep_after, int *inl_after,
+                                     int *sleep_cfg_rc, int *inl_cfg_rc,
+                                     int *sleep_set_rc);
+
 #endif /* BLDC_DRIVER_3PWM_H */
