@@ -151,10 +151,13 @@
 		/* Noise reduction: 32x hardware oversampling => ~sqrt(32) ≈ 5.7x less
 		 * angle noise. Default oversampling=1 (chip reset) gave ~8 deg p-p. */
 		oversampling = <32>;
-		/* Field is only ~3 mT, the default ±50/150 mT range wastes ADC bits.
-		 * 1 = ±25 mT (A1) / ±75 mT (A2) => doubles angular resolution. */
-		x-range = <1>;
-		y-range = <1>;
+		/* Measured in-plane field |Bxy| ≈ 50 mT (magnet at working distance).
+		 * At ±25 mT (range 1) both axes railed at ~25 (fake 315° angle); at
+		 * ±50 mT (range 0) the dominant axis still pegs at ~49.9 mT => still
+		 * clipping. Use 2 = ±100 mT (A1) / ±300 mT (A2) so the ~50 mT peak has
+		 * headroom and the angle stays linear over the full rotation. */
+		x-range = <2>;
+		y-range = <2>;
 	};
 
 	ssd1309: ssd1309@1 {
@@ -209,7 +212,7 @@
 	buttons {
 		compatible = "gpio-keys";
 
-		button_b1: button_b1 {
+		button_b1: btn_south: button_b1 {
 			gpios = <&gpio1  6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "B1";
 			zephyr,code = <INPUT_KEY_1>;

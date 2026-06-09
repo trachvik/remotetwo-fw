@@ -1,0 +1,130 @@
+[33mea4a8cf[m[33m ([m[1;36mHEAD[m[33m)[m HEAD@{0}: commit: USB DFU, haptic logging, +- 100 mT tmag range
+[33m701363f[m HEAD@{1}: checkout: moving from DRV_test to 701363f
+[33m50371a6[m[33m ([m[1;31morigin/DRV_test[m[33m, [m[1;32mDRV_test[m[33m)[m HEAD@{2}: checkout: moving from motor-debug-usb to DRV_test
+[33mb1625ab[m[33m ([m[1;32mmotor-debug-usb[m[33m)[m HEAD@{3}: commit: USB boot minimal DRV test
+[33m701363f[m HEAD@{4}: checkout: moving from 701363f404b4c3c9c670a9b94e637943d427f201 to motor-debug-usb
+[33m701363f[m HEAD@{5}: checkout: moving from 46b550d1a2994944e43c37e15c5249ede2c447c9 to HEAD^
+[33m46b550d[m HEAD@{6}: checkout: moving from DRV_test to 46b550d
+[33m50371a6[m[33m ([m[1;31morigin/DRV_test[m[33m, [m[1;32mDRV_test[m[33m)[m HEAD@{7}: checkout: moving from 46b550d1a2994944e43c37e15c5249ede2c447c9 to DRV_test
+[33m46b550d[m HEAD@{8}: commit: Test DRV 2
+[33m701363f[m HEAD@{9}: commit: Correct log
+[33mb6b2b2a[m HEAD@{10}: checkout: moving from b63d36e8900596719253041f1ca5d72bfb02d4ad to b6b2b2a
+[33mb63d36e[m HEAD@{11}: checkout: moving from f7164d5cb6fb54fc32564d46cd401549964264ec to b63d36e
+[33mf7164d5[m HEAD@{12}: checkout: moving from b6b2b2ad874761d2bacc9cd40513b1a0ae69387c to f7164d5
+[33mb6b2b2a[m HEAD@{13}: commit (amend): USB-DFU + UART logging
+[33m2ba0d73[m HEAD@{14}: commit (amend): USB-DFU + UART logging
+[33me083274[m HEAD@{15}: checkout: moving from b63d36e8900596719253041f1ca5d72bfb02d4ad to e083274
+[33mb63d36e[m HEAD@{16}: commit (amend): AS5048A -> TMAG5170
+[33m99aa97c[m HEAD@{17}: checkout: moving from e08327487487283e0d6560149de2a5c088182712 to HEAD^
+[33me083274[m HEAD@{18}: checkout: moving from 83b1d763fdfffb79504f902b7ed35017b67bde17 to e083274
+[33m83b1d76[m HEAD@{19}: commit (amend): AS5048A -> TMAG5170
+[33me2eaf9c[m HEAD@{20}: commit (amend): AS5048A -> TMAG5170
+[33mf7164d5[m HEAD@{21}: commit (amend): AS5048A -> TMAG5170
+[33m99aa97c[m HEAD@{22}: checkout: moving from DRV_test to 99aa97c
+[33m50371a6[m[33m ([m[1;31morigin/DRV_test[m[33m, [m[1;32mDRV_test[m[33m)[m HEAD@{23}: checkout: moving from 99aa97cc45e3f283b5f1803eab29b79502287de1 to DRV_test
+[33m99aa97c[m HEAD@{24}: checkout: moving from DISP_test to 99aa97c
+[33m4212a87[m[33m ([m[1;32mDISP_test[m[33m)[m HEAD@{25}: checkout: moving from a5bed2214d3606b0bec436222022a4b4e29bda7b to DISP_test
+[33ma5bed22[m HEAD@{26}: checkout: moving from 11cbb6d28364db4fbe3e33638f104b5118a5dd82 to a5bed2214d3606b0bec436222022a4b4e29bda7b
+[33m11cbb6d[m HEAD@{27}: checkout: moving from a5bed2214d3606b0bec436222022a4b4e29bda7b to HEAD~1
+[33ma5bed22[m HEAD@{28}: checkout: moving from 99aa97cc45e3f283b5f1803eab29b79502287de1 to HEAD^
+[33m99aa97c[m HEAD@{29}: checkout: moving from e08327487487283e0d6560149de2a5c088182712 to HEAD^
+[33me083274[m HEAD@{30}: commit: USB-DFU + UART logging
+[33m99aa97c[m HEAD@{31}: checkout: moving from eab10d5c1698218b98faaa2aa0cc37272edd524f to HEAD^
+[33meab10d5[m HEAD@{32}: commit: Save
+[33m99aa97c[m HEAD@{33}: commit: AS5048A -> TMAG5170
+[33ma5bed22[m HEAD@{34}: checkout: moving from DISP_test to HEAD^
+[33m4212a87[m[33m ([m[1;32mDISP_test[m[33m)[m HEAD@{35}: commit: Save
+[33ma5bed22[m HEAD@{36}: commit: Haptics works, extremely noisy
+[33m11cbb6d[m HEAD@{37}: commit: + motor, motor is spinning
+[33m3fbfa90[m[33m ([m[1;31morigin/DISP_test[m[33m)[m HEAD@{38}: checkout: moving from DRV_test to DISP_test
+[33m50371a6[m[33m ([m[1;31morigin/DRV_test[m[33m, [m[1;32mDRV_test[m[33m)[m HEAD@{39}: checkout: moving from DISP_TEST to DRV_test
+[33m3fbfa90[m[33m ([m[1;31morigin/DISP_test[m[33m)[m HEAD@{40}: reset: moving to HEAD
+[33m3fbfa90[m[33m ([m[1;31morigin/DISP_test[m[33m)[m HEAD@{41}: checkout: moving from main to DISP_TEST
+[33m56f2be2[m[33m ([m[1;32mmain[m[33m)[m HEAD@{42}: commit: Save
+[33m35c237d[m HEAD@{43}: checkout: moving from DISP_test to main
+[33m3fbfa90[m[33m ([m[1;31morigin/DISP_test[m[33m)[m HEAD@{44}: checkout: moving from TMAG_test to DISP_test
+[33m52bad20[m[33m ([m[1;32mTMAG_test[m[33m)[m HEAD@{45}: commit: Save
+[33m552559f[m[33m ([m[1;31morigin/TMAG_test[m[33m)[m HEAD@{46}: commit: Some changes in tmag, still not working
+[33m77e8bb2[m HEAD@{47}: checkout: moving from 2f34e70990aa1f3501f0206dc7499b1ad5dcf4b1 to TMAG_test
+[33m2f34e70[m HEAD@{48}: checkout: moving from main to 2f34e70990aa1f3501f02
+[33m35c237d[m HEAD@{49}: commit: still not working
+[33m002271e[m HEAD@{50}: commit: Motor moved, tmag is stuck at 0, white screen
+[33m1fbd144[m HEAD@{51}: checkout: moving from DRV_test to main
+[33m50371a6[m[33m ([m[1;31morigin/DRV_test[m[33m, [m[1;32mDRV_test[m[33m)[m HEAD@{52}: checkout: moving from main to DRV_test
+[33m1fbd144[m HEAD@{53}: commit: New hardware - first attempt
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{54}: checkout: moving from DISP_test to main
+[33m3fbfa90[m[33m ([m[1;31morigin/DISP_test[m[33m)[m HEAD@{55}: commit: Display + tmag working together
+[33mf4fb4ce[m HEAD@{56}: checkout: moving from TMAG_test to DISP_test
+[33m77e8bb2[m HEAD@{57}: checkout: moving from DISP_test to TMAG_test
+[33mf4fb4ce[m HEAD@{58}: commit: Trying display and tmag at the same time
+[33mb5009ce[m HEAD@{59}: commit: Display is working with swaped MOSI pin
+[33mbe7a11b[m HEAD@{60}: commit: Display is working, deleted debugging
+[33m1e047ef[m HEAD@{61}: commit: Display working
+[33m9ef67e7[m HEAD@{62}: checkout: moving from main to DISP_test
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{63}: checkout: moving from DISP_test to main
+[33m9ef67e7[m HEAD@{64}: commit: Disp test cmake and basic code
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{65}: checkout: moving from main to DISP_test
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{66}: checkout: moving from DRV_test to main
+[33m50371a6[m[33m ([m[1;31morigin/DRV_test[m[33m, [m[1;32mDRV_test[m[33m)[m HEAD@{67}: commit: Motor is working in open loop
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{68}: checkout: moving from main to DRV_test
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{69}: checkout: moving from TMAG_test to main
+[33m77e8bb2[m HEAD@{70}: commit: TMAG is working
+[33m845e5fe[m HEAD@{71}: commit: MOSI and MISO swaped, TMAG ready, 0 deg measured
+[33md21e40b[m HEAD@{72}: commit: TMAG ready full range measured
+[33m0952e5d[m HEAD@{73}: checkout: moving from NSI to TMAG_test
+[33m14c3263[m[33m ([m[1;31morigin/NSI[m[33m, [m[1;32mNSI[m[33m)[m HEAD@{74}: commit (amend): add docs to gitignore, config and src tweaks
+[33m9748566[m HEAD@{75}: commit: WIP: uncommitted local changes
+[33m7854f08[m HEAD@{76}: checkout: moving from 7854f087d8831a678a457298f684b9b5753ca7ba to NSI
+[33m7854f08[m HEAD@{77}: checkout: moving from TMAG_test to 7854f087d8831a678
+[33m0952e5d[m HEAD@{78}: commit: TMAG still not working
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{79}: checkout: moving from main to TMAG_test
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{80}: reset: moving to HEAD
+[33m64a4241[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{81}: commit: Build succesfull
+[33m2f34e70[m HEAD@{82}: commit: 3pwm implementation
+[33mbc73059[m HEAD@{83}: commit: New overlay for custom board
+[33m7854f08[m HEAD@{84}: commit: fix: BLE RX reassembly, split temp messages, query initial state on
+[33mda19ab5[m HEAD@{85}: commit: More features in the menu
+[33m864e2be[m HEAD@{86}: commit: Device tree pins change and PWM pins are now adjustable in the device tree
+[33m0c18193[m HEAD@{87}: commit: Display menus are working, some glitches - might be caused by loose wires
+[33m80a2ab7[m HEAD@{88}: commit: Haptics work with quick calibration
+[33m8e195a8[m HEAD@{89}: reset: moving to 8e195a8
+[33m0e0f9dd[m HEAD@{90}: checkout: moving from 8dcf4e87ffa9876f83c2c75d59f388b2efcaaa30 to main
+[33m8dcf4e8[m HEAD@{91}: checkout: moving from main to 8dcf4e87ffa9
+[33m0e0f9dd[m HEAD@{92}: checkout: moving from 8dcf4e87ffa9876f83c2c75d59f388b2efcaaa30 to main
+[33m8dcf4e8[m HEAD@{93}: checkout: moving from 4aa203a297c1f3ca41d4711a7f4211579a2bb756 to HEAD^
+[33m4aa203a[m HEAD@{94}: checkout: moving from 8742c78a31feff447564281bd9ada5072012aac5 to HEAD^
+[33m8742c78[m HEAD@{95}: checkout: moving from 94b9684d6eb512d7ab9df0078c343238a10bde07 to HEAD^
+[33m94b9684[m HEAD@{96}: checkout: moving from 8e195a8b7d48d076a1cd521e4943d91bb25997ae to HEAD^
+[33m8e195a8[m HEAD@{97}: commit: Custom disp lib + rest of the code
+[33m94b9684[m HEAD@{98}: checkout: moving from 1f09e86bb77dd9a9fe41e033588c65fa20db126e to HEAD^
+[33m1f09e86[m HEAD@{99}: checkout: moving from main to HEAD~2
+[33m0e0f9dd[m HEAD@{100}: checkout: moving from 4aa203a297c1f3ca41d4711a7f4211579a2bb756 to main
+[33m4aa203a[m HEAD@{101}: checkout: moving from 94b9684d6eb512d7ab9df0078c343238a10bde07 to HEAD~2
+[33m94b9684[m HEAD@{102}: checkout: moving from main to HEAD~3
+[33m0e0f9dd[m HEAD@{103}: commit: save
+[33m2200799[m HEAD@{104}: checkout: moving from 1f09e86bb77dd9a9fe41e033588c65fa20db126e to main
+[33m1f09e86[m HEAD@{105}: checkout: moving from main to HEAD^
+[33m2200799[m HEAD@{106}: checkout: moving from 94b9684d6eb512d7ab9df0078c343238a10bde07 to main
+[33m94b9684[m HEAD@{107}: checkout: moving from 1f09e86bb77dd9a9fe41e033588c65fa20db126e to HEAD^
+[33m1f09e86[m HEAD@{108}: checkout: moving from main to HEAD^
+[33m2200799[m HEAD@{109}: commit: Save
+[33m1f09e86[m HEAD@{110}: commit: Display is working with LVGL library
+[33m94b9684[m HEAD@{111}: commit: Hello Remote working - custom library
+[33m8742c78[m HEAD@{112}: commit: Enkoder started working, display shows rectangles
+[33m4aa203a[m HEAD@{113}: commit: Basic innicialization of the display - does not work so far
+[33m8dcf4e8[m HEAD@{114}: commit: Very pleasant Enter and Back control
+[33m70ec831[m HEAD@{115}: commit: Better haptic dead zone implementation
+[33m60da119[m HEAD@{116}: commit: Last commit before FOC revision
+[33m971d15c[m HEAD@{117}: checkout: moving from haptic-stops to main
+[33md0ee545[m[33m ([m[1;31morigin/haptic-stops[m[33m, [m[1;32mhaptic-stops[m[33m)[m HEAD@{118}: commit: Midpoint bump detent
+[33m971d15c[m HEAD@{119}: checkout: moving from main to haptic-stops
+[33m971d15c[m HEAD@{120}: reset: moving to HEAD
+[33m971d15c[m HEAD@{121}: commit: Virtual enter and back, smooth mode is not 100%
+[33m5af5da6[m HEAD@{122}: commit: Virtual click - detent mode working, large dead zone
+[33m5bca41f[m HEAD@{123}: commit: Added smooth mode control and pos and temp change based os step size
+[33m968d333[m HEAD@{124}: commit: btn3, btn4 -> haptic knob
+[33m2ffa0c0[m HEAD@{125}: commit: Added display drivers files
+[33m4f87ba5[m HEAD@{126}: commit: Real time position control + move buffer
+[33m47751c3[m HEAD@{127}: commit: Request/responce protocol
+[33m0f85e12[m HEAD@{128}: commit: New unified command logic, buttons instead of haptic knob
+[33m45b8e1f[m HEAD@{129}: clone: from https://github.com/trachvik/remotetwo-fw.git
