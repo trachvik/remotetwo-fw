@@ -4,6 +4,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
+#include <errno.h>
 #include <stdio.h>
 #include <math.h>
 #include <arm_math.h>
@@ -113,6 +114,8 @@ float haptic_dbg_cumulative_angle(void)
 
 /* FOC control loop thread - triggered by k_timer at 10 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
+static bldc_driver_t *g_driver_ptr = NULL;
+static sensor_t *g_encoder_ptr = NULL;
 static K_SEM_DEFINE(haptic_sem, 0, 1);
 static struct k_timer haptic_timer;
 
@@ -157,6 +160,60 @@ const char *haptic_diag_get_line(int idx)
         return "";
     }
     return g_haptic_diag[idx];
+}
+
+int haptic_recover_after_ble(void)
+{
+    if (g_motor_ptr == NULL || g_driver_ptr == NULL || g_encoder_ptr == NULL) {
+        return -ENODEV;
+    }
+
+    LOG_WRN("Recovering haptic HW after BLE startup transient");
+
+    k_timer_stop(&haptic_timer);
+    while (k_sem_take(&haptic_sem, K_NO_WAIT) == 0) {
+    }
+
+    bldc_motor_move(g_motor_ptr, 0.0f);
+    bldc_motor_loop_foc(g_motor_ptr);
+
+    int enc_ret = tmag5170_init((struct tmag5170_device *)g_encoder_ptr);
+    int drv_ret = bldc_driver_3pwm_init_hw((bldc_driver_3pwm_t *)g_driver_ptr);
+
+    sensor_update(g_encoder_ptr);
+    start_angle = sensor_get_angle(g_encoder_ptr);
+    haptic_prev_angle = -1.0f;
+    haptic_inst_vel = 0.0f;
+    smooth_vel = 0.0f;
+    smooth_v_filt = 0.0f;
+    detent_v_filt = 0.0f;
+    cumulative_angle = 0.0f;
+    smooth_vdetent_armed = false;
+    smooth_vdetent_center = 0.0f;
+    smooth_stationary_since_ms = 0;
+    smooth_nudge_dir = 0;
+    smooth_nudge_start_ms = 0;
+    smooth_prev_step_index = 0;
+    smooth_step_init = false;
+    detent_prev_init = false;
+    prev_detent_index = 0;
+    detent_nudge_dir = 0;
+    detent_nudge_start_ms = 0;
+    detent_nudge_fired = false;
+
+    k_timer_start(&haptic_timer, K_MSEC(1), K_MSEC(1));
+
+    LOG_INF("BLE recovery done: TMAG=%d DRV=%d start=%.2f deg",
+            enc_ret, drv_ret,
+            (double)(start_angle * 180.0f / 3.14159f));
+
+    if (enc_ret != 0) {
+        return enc_ret;
+    }
+    if (drv_ret != DRIVER_INIT_OK) {
+        return -EIO;
+    }
+    return 0;
 }
 
 /* Smoothly blend from 0 to 1 between lo and hi (Hermite interpolation).
@@ -254,6 +311,9 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 {
     bldc_driver_3pwm_t *driver_3pwm = (bldc_driver_3pwm_t *)driver;
     struct tmag5170_device *tmag = (struct tmag5170_device *)encoder;
+
+    g_driver_ptr = driver;
+    g_encoder_ptr = encoder;
 
     haptic_diag_reset();
 

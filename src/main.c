@@ -7,6 +7,7 @@
 #include "remote_control.h"
 #include "drivers/tmag5170_sensor.h"
 #include "ui_display.h"
+#include "BLE_commands.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
@@ -44,19 +45,29 @@ int main(void)
 	wait_for_usb_console_ready();
 	LOG_INF("System started, OTA update ready");
 
-	/* Display before BLE/haptic */
+	/* Sequence copied verbatim from the proven `main` branch, which ran the
+	 * SPI display + TMAG encoder + DRV8311 motor + BLE all together on the
+	 * nRF5340 DK:
+	 *
+	 *   1) Start the BLE radio FIRST.
+	 *   2) Wait 300 ms so the RF front-end start-up current surge settles.
+	 *      Without this the surge drops PVDD below the DRV8311H UVLO threshold
+	 *      (latching a permanent fault) and disturbs the MIC2288 OLED boost,
+	 *      leaving the display white and the TMAG5170 reading 0 mT.
+	 *   3) Only THEN bring up the display + motor driver + encoder.
+	 *
+	 * No DC/DC Kconfig tricks — just the settle delay, exactly like main. */
+	ble_commands_init();
+	k_msleep(300);
+
+	/* Supply now stable: bring up display and haptic. */
 	if (ui_display_init() == 0) {
 		(void)ui_display_show_hello_remote();
 	}
 
-	/* Initialize haptic motor FIRST and let it finish completely.
-	 * The FOC calibration is timing-sensitive and floods the USB-CDC log;
-	 * running BLE (bt_enable + net-core HCI IPC) concurrently starves it and
-	 * leaves the motor uninitialised. BLE is started afterwards from
-	 * remote_control_init(). */
 	haptic_init(&motor, (bldc_driver_t *)&driver, (sensor_t *)&encoder);
 
-	/* Register knob callbacks and start BLE (off the critical path). */
+	/* Finish UI/menu init (BLE already up). */
 	remote_control_init();
 
 	uint32_t heartbeat = 0;

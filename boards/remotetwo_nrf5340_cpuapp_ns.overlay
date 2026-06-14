@@ -5,7 +5,7 @@
  * LFXO  - 32.768 kHz crystal ABS07-32.768KHZ-9-T
  *   internal load capacitors set to 9 pF (= 9000 fF)
  *
- * SPI0  - TMAG5170 magnetic angle sensor  (CS: P1.15)
+ * SPI3  - TMAG5170 magnetic angle sensor  (CS: P1.15)
  *       + SSD1309 OLED display            (CS: P0.02)
  *   SCK  -> P0.08   MOSI -> P0.10   MISO -> P0.09
  *
@@ -56,6 +56,30 @@
     status = "disabled";
 };
 
+/* SPI bus moved to spi3 (SERIAL3). Make sure the old SERIAL0 SPIM is off so it
+ * cannot claim the shared pins or instance. */
+&spi0 {
+    status = "disabled";
+};
+
+/*
+ * Stop the application core from forwarding the net-core console-UART pins.
+ *
+ * The DK common devicetree forwards P1.01/P1.00/P0.11/P0.10 (net-core uart0
+ * TX/RX/RTS/CTS) to the network core via nrf-gpio-forwarder. On the RemoteTwo
+ * board P0.10 is the SPI MOSI shared by the TMAG5170 and SSD1309. Once
+ * bt_enable() boots the net core, the forwarded P0.10 is handed to the net-core
+ * uart0 (CTS), stealing MOSI from the app-core SPIM: every SPI write still
+ * "succeeds" but no data reaches the devices, so the TMAG reads 0 mT and the
+ * OLED shows checkerboard. hci_ipc needs no serial console, so remove the
+ * forward entirely. A GPIO is only accessible to the net core if the app core
+ * forwards it, so deleting this node keeps P0.10 (and the others) owned by the
+ * app core. This is an app-core-only change, deployable over the existing DFU.
+ */
+&gpio_fwd {
+    /delete-node/ uart;
+};
+
 / {
     buttons {
         /delete-node/ button_0;
@@ -66,8 +90,12 @@
 };
 
 &pinctrl {
-	/* ---- SPI0: TMAG5170 + SSD1309 OLED ---- */
-	spi0_default: spi0_default {
+	/* ---- SPI3: TMAG5170 + SSD1309 OLED ----
+	 * Uses SERIAL3 (spi3 @ 0xc000), a free instance. The bus was previously on
+	 * spi0 (SERIAL0), which is shared with the console uart0; once the BLE stack
+	 * started, that SERIAL0 SPIM stopped clocking (TMAG read 0 mT, OLED stayed
+	 * uninitialised/checkerboard). Same physical pins, just a different instance. */
+	spi3_default: spi3_default {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
 				<NRF_PSEL(SPIM_MOSI, 0, 10)>;
@@ -77,7 +105,7 @@
 			bias-pull-up;
 		};
 	};
-	spi0_sleep: spi0_sleep {
+	spi3_sleep: spi3_sleep {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  0, 8)>,
 				<NRF_PSEL(SPIM_MOSI, 0, 10)>,
@@ -130,13 +158,15 @@
 };
 
 /* ================================================================
- * SPI0 – TMAG5170 (reg=0) + SSD1309 OLED (reg=1)
+ * SPI3 – TMAG5170 (reg=0) + SSD1309 OLED (reg=1)
+ * Moved off SERIAL0 (spi0, shared with console uart0) to the free SERIAL3
+ * instance so the bus keeps clocking after the BLE stack starts.
  * ================================================================ */
-&spi0 {
+&spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
-	pinctrl-0 = <&spi0_default>;
-	pinctrl-1 = <&spi0_sleep>;
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
 	cs-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>,   /* CS_TMAG  – P1.15 */
 		   <&gpio0  2 GPIO_ACTIVE_LOW>;    /* CSn_OLED – P0.02 */

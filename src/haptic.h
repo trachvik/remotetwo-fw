@@ -34,4 +34,8 @@ uint32_t haptic_step_fire_count(void);
 /* Live unwrapped mechanical angle accumulated by the FOC loop [rad]. */
 float haptic_dbg_cumulative_angle(void);
 
+/* Recover DRV8311 + TMAG after the one-shot supply transient caused by
+ * bt_enable() starting the network core / radio. */
+int haptic_recover_after_ble(void);
+
 #endif /* HAPTIC_H */

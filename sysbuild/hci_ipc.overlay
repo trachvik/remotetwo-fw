@@ -1,0 +1,21 @@
+/*
+ * Network-core (hci_ipc) devicetree overlay for the RemoteTwo board.
+ *
+ * The nRF5340 DK net-core devicetree enables uart0 as its console, and the DK
+ * net-core pinctrl maps UART_CTS to P0.10. On the RemoteTwo board P0.10 is the
+ * SPI MOSI line shared by the TMAG5170 angle sensor and the SSD1309 OLED.
+ *
+ * As soon as bt_enable() boots the net core, the hci_ipc image configures
+ * uart0 and claims P0.10 for UART_CTS, stealing the MOSI line from the app-core
+ * SPIM. The result: every SPI write still "succeeds" in the register, but no
+ * data reaches the devices -> the TMAG reads 0 mT and the OLED shows
+ * uninitialised/checkerboard contents. This only happens once BLE is enabled,
+ * which is exactly the observed behaviour.
+ *
+ * hci_ipc needs only the IPC link, not a serial console, so disable uart0 on
+ * the net core to free P0.10 for the app-core SPI bus.
+ */
+
+&uart0 {
+	status = "disabled";
+};

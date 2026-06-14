@@ -5,7 +5,7 @@
  * Uses the Zephyr TMAG5170 driver (CONFIG_TMAG5170=y) via the standard
  * sensor API.  The FOC interface (sensor_update / sensor_get_angle …)
  * is rate-limited to 500 Hz to avoid SPI contention with the SSD1309
- * display driver sharing the same SPI0 bus.
+ * display driver sharing the same SPI3 bus.
  */
 
 #include "tmag5170_sensor.h"
