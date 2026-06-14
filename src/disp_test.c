@@ -283,11 +283,11 @@ static void screen_angle(const struct device *disp, const struct sensor_value *a
     fb_flush(disp);
 }
 
-/* ── Entry point ─────────────────────────────────────────────────────── */
+/* Entry point */
 
 int main(void)
 {
-    /* USB: inicializuj jen pokud to INITIALIZE_AT_BOOT neudělal automaticky */
+    /* Initialize USB only if INITIALIZE_AT_BOOT did not already do it. */
     if (!IS_ENABLED(CONFIG_USB_DEVICE_INITIALIZE_AT_BOOT)) {
         if (usb_enable(NULL) != 0) {
             LOG_ERR("Failed to enable USB");
@@ -295,7 +295,7 @@ int main(void)
         }
     }
 
-    /* Počkat max 3 s na připojení terminálu – nesmí blokovat mcumgr navždy */
+    /* Wait up to 3 s for terminal attach; never block mcumgr forever. */
     const struct device *dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
     if (IS_ENABLED(CONFIG_UART_LINE_CTRL)) {
         uint32_t dtr = 0;
@@ -307,7 +307,7 @@ int main(void)
 
     LOG_INF("USB Console Connected! Welcome to Remote Two.");
     
-    // ... tvůj stávající kód ...
+    /* Main display/TMAG test flow continues below. */
 
     const struct device *disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 #if DT_NODE_HAS_STATUS(TMAG_NODE, okay)

@@ -14,7 +14,7 @@ void haptic_set_num_steps(int steps);
 void haptic_set_step_callback(void (*cb)(int dir));
 void haptic_set_virtual_click_callback(void (*cb)(int dir));
 
-/* ── Diagnostic line buffer ──────────────────────────────────────────────
+/* Diagnostic line buffer:
  * haptic_init() captures diagnostic output (e.g. the open-loop torque probe)
  * into a small buffer instead of logging it directly, because bursts of log
  * lines flood the USB-CDC console and get dropped. The caller's slow main loop
