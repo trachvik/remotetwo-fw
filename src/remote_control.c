@@ -102,15 +102,6 @@ static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 #define SMOOTH_MENU_STEP_DIV    3
 #define DISPLAY_IDLE_TIMEOUT_MS 20000
 
-/* --- BLE init switch -------------------------------------------------------
- * A/B DIAGNOSTIC SWITCH: set to 0 to NOT call bt_enable() at all (reproduces
- * the no-BLE build where haptic+display work standalone). With =1, BLE is
- * brought up synchronously at the very start of remote_control_init(), BEFORE
- * haptic_init() runs (called from main), so the radio startup transient settles
- * before the encoder/driver are initialised — matching the proven main-branch
- * order that worked on the nRF5340 DK with the same SPI bus. */
-#define REMOTE_CONTROL_ENABLE_BLE 1
-
 /* --- 20-second inactivity timer: switch back to status screen --- */
 static struct k_work_delayable g_idle_disp_work;
 
@@ -1049,9 +1040,9 @@ static void on_virtual_click(int dir)
 {
     if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE) {
         if (dir >= 0) {
-            on_back_action();
-        } else {
             on_confirm_action();
+        } else {
+            on_back_action();
         }
         return;
     }
@@ -1068,9 +1059,9 @@ static void on_virtual_click(int dir)
     if (g_pending_click_dir != 0 && g_pending_click_dir != dir) {
         k_work_cancel_delayable(&g_click_eval_work);
         if (g_pending_click_dir >= 0) {
-            on_back_action();
-        } else {
             on_confirm_action();
+        } else {
+            on_back_action();
         }
         g_pending_click_dir = 0;
     }
@@ -1085,9 +1076,9 @@ static void click_eval_work_handler(struct k_work *work)
     int dir = g_pending_click_dir;
     g_pending_click_dir = 0;
     if (dir >= 0) {
-        on_back_action();
-    } else {
         on_confirm_action();
+    } else {
+        on_back_action();
     }
 }
 

@@ -460,14 +460,13 @@ static void ble_queue_text(const char *text)
     struct ble_tx_msg msg;
     size_t len = strlen(text);
 
-    if (len >= BLE_MSG_MAX_LEN - 1) {  /* -1 reserves space for \n terminator */
-        len = BLE_MSG_MAX_LEN - 2;
+    if (len >= BLE_MSG_MAX_LEN) {
+        len = BLE_MSG_MAX_LEN - 1;
     }
 
     memcpy(msg.payload, text, len);
-    msg.payload[len] = '\n';   /* newline terminator so gateway can frame messages */
-    msg.payload[len + 1] = '\0';
-    msg.len = (uint8_t)(len + 1);
+    msg.payload[len] = '\0';
+    msg.len = (uint8_t)len;
 
     int ret = k_msgq_put(&ble_tx_msgq, &msg, K_NO_WAIT);
     if (ret == -ENOMSG) {
@@ -487,7 +486,7 @@ void ble_send_gcode(const char *cmd)
     }
 
     char framed[BLE_MSG_MAX_LEN];
-    int ret = snprintf(framed, sizeof(framed), "cmd:%u:%s", id, cmd);
+    int ret = snprintf(framed, sizeof(framed), "cmd:%u:%s\n", id, cmd);
     if (ret <= 0 || ret >= (int)sizeof(framed)) {
         LOG_WRN("Command too long, dropping '%s'", cmd);
         return;

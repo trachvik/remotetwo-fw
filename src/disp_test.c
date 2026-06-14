@@ -341,16 +341,6 @@ int main(void)
     LOG_INF("Combined test: TMAG5170 + SSD1309 + Haptic");
 
     while (1) {
-        /* Drain the haptic diagnostic buffer ONE line per iteration.
-         * haptic_init() captures the open-loop torque probe results here
-         * because USB-CDC drops fast bursts; the slow 100 ms loop prints
-         * them reliably. */
-        static int diag_printed = 0;
-        if (diag_printed < haptic_diag_count()) {
-            LOG_INF("%s", haptic_diag_get_line(diag_printed));
-            diag_printed++;
-        }
-
         /* Display and TMAG are serviced every 100 ms in the main thread. */
 #if DT_NODE_HAS_STATUS(TMAG_NODE, okay)
         struct sensor_value angle;

@@ -20,15 +20,19 @@ static const struct gpio_dt_spec g_ctrl =
 static const struct gpio_dt_spec g_mic2288 =
     GPIO_DT_SPEC_GET(DT_NODELABEL(mic2288_mos), gpios);
 
-/* Enable both power rails at POST_KERNEL 10, before SPI (70) and
- * SSD1309 display driver (90) attempt to communicate over SPI. */
+/* Enable ONLY the controller-logic rail (TPS62740) at POST_KERNEL 10, before
+ * SPI (70) and the SSD1309 display driver (90) communicate over SPI.
+ * The high-voltage OLED panel rail (MIC2288 boost, 12.6 V) is deliberately
+ * left OFF here: powering the panel while the controller GDDRAM still holds
+ * random power-up data would show a checkerboard. It is enabled later, in
+ * ui_display_init(), only AFTER the framebuffer has been cleared. */
 static int power_rails_init(void)
 {
     if (gpio_is_ready_dt(&g_ctrl)) {
         gpio_pin_configure_dt(&g_ctrl, GPIO_OUTPUT_ACTIVE);
     }
     if (gpio_is_ready_dt(&g_mic2288)) {
-        gpio_pin_configure_dt(&g_mic2288, GPIO_OUTPUT_ACTIVE);
+        gpio_pin_configure_dt(&g_mic2288, GPIO_OUTPUT_INACTIVE);
     }
     k_sleep(K_MSEC(20));
     return 0;
@@ -53,7 +57,7 @@ static const uint8_t font5x7[][5] = {
     {0x24,0x2A,0x7F,0x2A,0x12}, /* '$' */
     {0x23,0x13,0x08,0x64,0x62}, /* '%' */
     {0x36,0x49,0x55,0x22,0x50}, /* '&' */
-    {0x00,0x05,0x03,0x00,0x00}, /* '\'' */
+    {0x06,0x09,0x09,0x06,0x00}, /* '\'' — repurposed as degree symbol ° */
     {0x00,0x1C,0x22,0x41,0x00}, /* '(' */
     {0x00,0x41,0x22,0x1C,0x00}, /* ')' */
     {0x14,0x08,0x3E,0x08,0x14}, /* '*' */
@@ -235,14 +239,24 @@ static void request_render(void)
 
 int ui_display_init(void)
 {
-    /* Power rails are already enabled by power_rails_init() SYS_INIT.
-     * Just verify the display device is ready. */
     g_disp = DEVICE_DT_GET(DT_NODELABEL(ssd1309));
     if (!device_is_ready(g_disp)) {
         LOG_ERR("SSD1309 device not ready");
         return -ENODEV;
     }
     LOG_INF("SSD1309 ready");
+    /* The SSD1309 GDDRAM holds random data after power-up. Clear it and push
+     * the blank frame out while the OLED panel high-voltage rail is still OFF,
+     * so the random checkerboard can never reach the panel. Only after the
+     * RAM is blank do we enable the MIC2288 boost (12.6 V) and turn the
+     * display on. This follows the SSD1309 datasheet power-on sequence. */
+    memset(g_fb, 0x00, BUF_LEN);
+    fb_flush();
+    /* Now power the OLED panel: RAM is guaranteed blank. */
+    if (gpio_is_ready_dt(&g_mic2288)) {
+        gpio_pin_set_dt(&g_mic2288, 1);
+    }
+    k_sleep(K_MSEC(100)); /* let the 12.6 V boost rail stabilise */
     display_blanking_off(g_disp);
     k_work_init_delayable(&g_flash_restore_work, flash_restore_fn);
     return 0;
