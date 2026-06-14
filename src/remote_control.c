@@ -102,6 +102,37 @@ static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 #define SMOOTH_MENU_STEP_DIV    3
 #define DISPLAY_IDLE_TIMEOUT_MS 20000
 
+/* --- Background BLE init ---------------------------------------------------
+ * bt_enable() blocks until the network core (HCI IPC) responds. If the net
+ * core firmware is missing/stale (e.g. after an app-only DFU update) that call
+ * can block for a long time or forever. Running it in a dedicated thread keeps
+ * the haptic motor, display and knob menu fully functional regardless of BLE
+ * state. */
+/* A/B DIAGNOSTIC SWITCH: set to 0 to NOT call bt_enable() at all. The TMAG5170
+ * encoder SPI reads start failing with -EIO and the DRV8311 trips nFAULT the
+ * instant bt_enable() boots the net core (suspected supply droop / net-core
+ * pin takeover). With BLE off the build behaves like the working DISP_TEST.
+ * Flip back to 1 once the BLE-induced fault is understood/fixed. */
+#define REMOTE_CONTROL_ENABLE_BLE 0
+
+#if REMOTE_CONTROL_ENABLE_BLE
+#define BLE_INIT_STACK_SIZE 2048
+#define BLE_INIT_THREAD_PRIO 7
+static K_THREAD_STACK_DEFINE(ble_init_stack, BLE_INIT_STACK_SIZE);
+static struct k_thread ble_init_thread_data;
+
+static void ble_init_thread_fn(void *a, void *b, void *c)
+{
+    ARG_UNUSED(a);
+    ARG_UNUSED(b);
+    ARG_UNUSED(c);
+    int err = ble_commands_init();
+    if (err != 0) {
+        LOG_ERR("BLE init failed (%d) - continuing without BLE", err);
+    }
+}
+#endif
+
 /* --- 20-second inactivity timer: switch back to status screen --- */
 static struct k_work_delayable g_idle_disp_work;
 
@@ -1084,11 +1115,6 @@ static void click_eval_work_handler(struct k_work *work)
 
 void remote_control_init(void)
 {
-    int err = ble_commands_init();
-    if (err != 0) {
-        LOG_ERR("BLE init failed (%d)", err);
-    }
-
     g_level          = MENU_LEVEL_ROOT;
     g_root_sel       = ROOT_CONTROL;
     g_ctrl_sel       = CTRL_HOME_ALL;
@@ -1120,6 +1146,18 @@ void remote_control_init(void)
      * refresh, so clear it explicitly. */
     atomic_set(&g_menu_refresh_pending, 0);
     ui_display_set_mode(UI_DISP_STATUS);
+
+    /* Start BLE last and off the critical path: a missing/stale net-core
+     * image must never block the haptic motor, display or knob menu. */
+#if REMOTE_CONTROL_ENABLE_BLE
+    k_thread_create(&ble_init_thread_data, ble_init_stack,
+                    K_THREAD_STACK_SIZEOF(ble_init_stack),
+                    ble_init_thread_fn, NULL, NULL, NULL,
+                    BLE_INIT_THREAD_PRIO, 0, K_NO_WAIT);
+    k_thread_name_set(&ble_init_thread_data, "ble_init");
+#else
+    LOG_WRN("BLE init DISABLED (A/B test): verifying haptic+display work without bt_enable()");
+#endif
 }
 
 void remote_control_tick(void)

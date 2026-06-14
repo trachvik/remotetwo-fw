@@ -49,11 +49,15 @@ int main(void)
 		(void)ui_display_show_hello_remote();
 	}
 
-	/* Initialize BLE */
-	remote_control_init();
-
-	/* Initialize haptic motor */
+	/* Initialize haptic motor FIRST and let it finish completely.
+	 * The FOC calibration is timing-sensitive and floods the USB-CDC log;
+	 * running BLE (bt_enable + net-core HCI IPC) concurrently starves it and
+	 * leaves the motor uninitialised. BLE is started afterwards from
+	 * remote_control_init(). */
 	haptic_init(&motor, (bldc_driver_t *)&driver, (sensor_t *)&encoder);
+
+	/* Register knob callbacks and start BLE (off the critical path). */
+	remote_control_init();
 
 	uint32_t heartbeat = 0;
 
@@ -62,7 +66,24 @@ int main(void)
 		ui_display_process();
 
 		if ((heartbeat++ % 200) == 0U) {
-			LOG_INF("App alive");
+			/* The USB-CDC console is dead for ~16 s during USB (re)enumeration
+			 * after boot, which swallows every haptic_init() log line. Drain the
+			 * diagnostic buffer SLOWLY here — one line per heartbeat (~3 s) — so
+			 * the milestones land in the window where the console is alive again.
+			 * Also report the live motor status so we can tell whether FOC init
+			 * actually succeeded. */
+			static int diag_printed = 0;
+			if (diag_printed < haptic_diag_count()) {
+				LOG_INF("HAPTIC %s", haptic_diag_get_line(diag_printed));
+				diag_printed++;
+			}
+			LOG_INF("App alive | mstatus=%d zea=%.3f tgt=%.3f loop=%u cum=%.3f steps=%u",
+				motor.motor_status,
+				(double)motor.zero_electric_angle,
+				(double)motor.target,
+				haptic_loop_count(),
+				(double)haptic_dbg_cumulative_angle(),
+				haptic_step_fire_count());
 		}
 
 		k_msleep(15);

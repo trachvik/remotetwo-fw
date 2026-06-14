@@ -89,6 +89,28 @@ static int detent_nudge_dir = 0;
 static int64_t detent_nudge_start_ms = 0;
 static bool detent_nudge_fired = false;
 
+/* Diagnostic: counts every haptic_loop() iteration so the main thread can tell
+ * whether the 1 kHz FOC thread is actually running (0 => thread never ran). */
+static volatile uint32_t g_haptic_loop_count;
+
+/* Diagnostic: counts how many times g_step_cb fired (knob navigation events). */
+static volatile uint32_t g_step_fire_count;
+
+uint32_t haptic_loop_count(void)
+{
+    return g_haptic_loop_count;
+}
+
+uint32_t haptic_step_fire_count(void)
+{
+    return g_step_fire_count;
+}
+
+float haptic_dbg_cumulative_angle(void)
+{
+    return cumulative_angle;
+}
+
 /* FOC control loop thread - triggered by k_timer at 10 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
 static K_SEM_DEFINE(haptic_sem, 0, 1);
@@ -385,6 +407,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 
 void haptic_loop(bldc_motor_t *motor)
 {
+    g_haptic_loop_count++;
     int num_steps = haptic_update_num_steps_from_button();
     if (g_num_steps_override >= 0) {
         num_steps = g_num_steps_override;
@@ -463,6 +486,7 @@ void haptic_loop(bldc_motor_t *motor)
                 int dir = (delta > 0) ? 1 : -1;
                 int steps = (delta > 0) ? delta : -delta;
                 for (int i = 0; i < steps; i++) {
+                    g_step_fire_count++;
                     if (g_step_cb) {
                         g_step_cb(dir);
                     }
@@ -576,6 +600,7 @@ void haptic_loop(bldc_motor_t *motor)
             int dir = (delta > 0) ? 1 : -1;
             int steps = (delta > 0) ? delta : -delta;
             for (int i = 0; i < steps; i++) {
+                g_step_fire_count++;
                 if (g_step_cb) {
                     g_step_cb(dir);
                 }

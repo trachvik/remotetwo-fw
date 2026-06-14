@@ -24,4 +24,14 @@ void haptic_set_virtual_click_callback(void (*cb)(int dir));
 int  haptic_diag_count(void);
 const char *haptic_diag_get_line(int idx);
 
+/* Number of haptic_loop() iterations executed so far. Stays 0 if the 1 kHz FOC
+ * thread never runs. */
+uint32_t haptic_loop_count(void);
+
+/* Number of knob navigation step callbacks fired so far. */
+uint32_t haptic_step_fire_count(void);
+
+/* Live unwrapped mechanical angle accumulated by the FOC loop [rad]. */
+float haptic_dbg_cumulative_angle(void);
+
 #endif /* HAPTIC_H */
