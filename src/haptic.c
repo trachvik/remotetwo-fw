@@ -35,11 +35,27 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5 deg, no PWM output */
 #define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* smooth force ramp from 0 to full between 0.5 and 2.5 deg */
 #define HAPTIC_DETENT_AMP_V 1.0f    /* peak spring voltage in detent mode */
-#define DETENT_KV           0.08f   /* V*s/rad velocity damping in detent mode */
-#define VEL_LPF_ALPHA       0.1f    /* fast velocity IIR in detent mode, about 16 Hz BW */
+#define DETENT_KV           0.20f   /* V*s/rad velocity damping in detent mode.
+                                     * Raised from 0.08f to critically damp the spring so the knob
+                                     * settles instead of ringing after a flick/release. */
+#define VEL_LPF_ALPHA       0.18f   /* fast velocity IIR in detent mode, ~31 Hz BW.
+                                     * Raised from 0.1f: less phase lag in the damping path so
+                                     * the damping force stays in phase with the oscillation and
+                                     * actually removes energy instead of feeding a limit cycle. */
 #define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz, tau about 10 ms */
-#define DETENT_IIR_ALPHA    0.30f   /* fast response in detent mode, tau about 1.1 ms */
-                                     /* was 0.30f, increased for snappier detent response */
+#define DETENT_IIR_ALPHA    0.22f   /* output IIR in detent mode, tau ~3.5 ms (~45 Hz).
+                                     * Lowered from 0.30f: the extra output low-pass kills the
+                                     * high-frequency self-excited buzz/limit-cycle that voltage
+                                     * mode shows after a flick, at the cost of slightly softer
+                                     * detent snap. Lower further (0.15) if buzz persists. */
+#define DETENT_VEL_DEADBAND 0.02f   /* rad/s: null only true at-rest encoder jitter. Kept small:
+                                     * a large deadband removed damping from SMALL oscillations,
+                                     * which is exactly what let a lightly-sprung knob ring. */
+#define DETENT_SPRING_POS_ALPHA 0.30f /* 1-pole LPF (~60 Hz @1kHz) on the position used ONLY for
+                                       * the spring force. Cuts encoder position noise (which the
+                                       * steep spring slope turns into audible buzz) while keeping
+                                       * hand motion (<15 Hz) intact. Navigation/step counting
+                                       * stays on the raw angle so detent counting is crisp. */
 
 /* PWM pin definitions removed, hardware is fully described in the board overlay. */
 
@@ -67,6 +83,10 @@ static float start_angle = 0.0f;
 static int num_steps_old = 0;
 static int prev_detent_index = 0;
 static bool detent_prev_init = false;
+static float detent_origin = 0.0f;       /* phase offset so a detent center maps to the angle
+                                          * that was current when num_steps last changed */
+static float detent_spring_pos = 0.0f;   /* LPF position used only for the spring force */
+static bool detent_spring_pos_init = false;
 static float cumulative_angle = 0.0f;   /* unwrapped mechanical angle since start [rad] */
 static void (*g_step_cb)(int dir) = NULL;
 static void (*g_virtual_click_cb)(int dir) = NULL;
@@ -365,6 +385,7 @@ void haptic_loop(bldc_motor_t *motor)
         detent_nudge_start_ms = 0;
         detent_nudge_fired = false;
         detent_prev_init = false;
+        detent_spring_pos_init = false;
     }
 
     /* 3PWM: no phase-state management needed, just keep duty cycles active. */
@@ -493,15 +514,24 @@ void haptic_loop(bldc_motor_t *motor)
     } else {
         /* ---- Detent mode: sinusoidal spring + velocity damping ---- */
         float step_size  = _2PI / (float)num_steps;
-        float normalized = cumulative_angle / step_size;
+
+        /* Phase-origin alignment: on the first loop after entering detent mode or
+         * after num_steps changed, anchor the detent grid so the CURRENT mechanical
+         * angle is exactly a detent center. Without this, a different num_steps puts
+         * the nearest detent center at a different angle and the spring yanks the knob
+         * there ("cuknuti" / self-movement on step switch). With it, the spring force
+         * is zero at the instant of switching. */
+        if (!detent_prev_init) {
+            detent_origin = cumulative_angle
+                          - roundf(cumulative_angle / step_size) * step_size;
+            prev_detent_index = (int)roundf((cumulative_angle - detent_origin) / step_size);
+            detent_prev_init = true;
+        }
+
+        float normalized = (cumulative_angle - detent_origin) / step_size;
         float nearest_f  = roundf(normalized);
         int current_detent_index = (int)nearest_f;
 
-        /* Incremental encoder-style output: emit +1/-1 per crossed detent. */
-        if (!detent_prev_init) {
-            prev_detent_index = current_detent_index;
-            detent_prev_init = true;
-        }
         int delta = current_detent_index - prev_detent_index;
         if (delta != 0) {
             int dir = (delta > 0) ? 1 : -1;
@@ -548,18 +578,43 @@ void haptic_loop(bldc_motor_t *motor)
             }
         }
 
-        float v_sp = -DETENT_KV * haptic_inst_vel;
-        /* Smooth blend-in to avoid oscillation at the dead zone edge. */
-        {
-            float abs_err_rad = fabsf(norm_err * step_size);
-            float blend = haptic_blend(abs_err_rad, HAPTIC_ZERO_ZONE_RAD, HAPTIC_BLEND_ZONE_RAD);
-            v_sp += -blend * HAPTIC_DETENT_AMP_V * sinf(_2PI * norm_err);
+        /* Velocity damping term, kept OUT of the output IIR so it has minimal phase lag
+         * and can actually remove oscillation energy (a delayed damping force feeds the
+         * limit cycle instead of killing it). */
+        float v_damp = haptic_inst_vel;
+        if (v_damp > -DETENT_VEL_DEADBAND && v_damp < DETENT_VEL_DEADBAND) {
+            v_damp = 0.0f;
         }
+        float damp_v = -DETENT_KV * v_damp;
+
+        /* Spring force from a lightly low-pass-filtered position. The raw encoder angle
+         * has ~tenths-of-a-degree noise; the steep spring slope turns that into audible
+         * buzz. Filtering the position (only for the force, not for step counting) cuts
+         * the buzz while keeping hand motion intact. */
+        float spring_v;
+        {
+            if (!detent_spring_pos_init) {
+                detent_spring_pos = cumulative_angle;
+                detent_spring_pos_init = true;
+            }
+            detent_spring_pos += DETENT_SPRING_POS_ALPHA * (cumulative_angle - detent_spring_pos);
+
+            float spring_norm = (detent_spring_pos - detent_origin) / step_size;
+            float spring_err  = spring_norm - roundf(spring_norm);
+            float abs_err_rad = fabsf(spring_err * step_size);
+            float blend = haptic_blend(abs_err_rad, HAPTIC_ZERO_ZONE_RAD, HAPTIC_BLEND_ZONE_RAD);
+            spring_v = -blend * HAPTIC_DETENT_AMP_V * sinf(_2PI * spring_err);
+        }
+
+        /* Output IIR smooths the SPRING force only (its job is to kill the HF buzz the
+         * steep spring slope creates). Damping is added AFTERWARDS so it stays fast. */
+        detent_v_filt = DETENT_IIR_ALPHA * spring_v + (1.0f - DETENT_IIR_ALPHA) * detent_v_filt;
+        float v_sp = detent_v_filt + damp_v;
+
         if (v_sp >  motor->voltage_limit) v_sp =  motor->voltage_limit;
         if (v_sp < -motor->voltage_limit) v_sp = -motor->voltage_limit;
 
-        detent_v_filt = DETENT_IIR_ALPHA * v_sp + (1.0f - DETENT_IIR_ALPHA) * detent_v_filt;
-        target_voltage = detent_v_filt;
+        target_voltage = v_sp;
     }
 
     /* move() sets target, loop_foc() applies it using fresh electrical angle.
