@@ -90,6 +90,7 @@ static bool detent_nudge_fired = false;
 
 /* FOC control loop thread - triggered by k_timer at 1 kHz */
 static bldc_motor_t *g_motor_ptr = NULL;
+static bldc_driver_3pwm_t *g_driver_ptr = NULL;
 static K_SEM_DEFINE(haptic_sem, 0, 1);
 static struct k_timer haptic_timer;
 
@@ -295,6 +296,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 
     /* Start 1 kHz FOC control loop. */
     g_motor_ptr = motor;
+    g_driver_ptr = driver_3pwm;
     k_timer_init(&haptic_timer, haptic_timer_cb, NULL);
     k_thread_create(&haptic_thread_data, haptic_stack,
                    K_THREAD_STACK_SIZEOF(haptic_stack),
@@ -304,6 +306,22 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     k_timer_start(&haptic_timer, K_MSEC(1), K_MSEC(1));  /* 1 kHz, matches reference */
 
     return 0;
+}
+
+void haptic_shutdown(void)
+{
+    /* Stop the 1 kHz FOC loop so nothing re-energises the phases after we
+     * zero them, then park the motor, sleep the driver and the encoder. */
+    k_timer_stop(&haptic_timer);
+
+    if (g_motor_ptr != NULL) {
+        bldc_motor_set_phase_voltage(g_motor_ptr, 0.0f, 0.0f, 0.0f);
+    }
+    if (g_driver_ptr != NULL) {
+        bldc_driver_3pwm_sleep(g_driver_ptr);   /* nSLEEP LOW */
+    }
+    (void)tmag5170_sleep();                      /* TMAG5170 deep-sleep */
+    LOG_INF("Haptic subsystem shut down (motor parked, driver+encoder asleep)");
 }
 
 void haptic_loop(bldc_motor_t *motor)

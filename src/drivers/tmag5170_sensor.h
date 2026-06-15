@@ -32,6 +32,16 @@ struct tmag5170_device {
  */
 int tmag5170_init(struct tmag5170_device *dev);
 
+/**
+ * @brief Put the TMAG5170 into deep-sleep (low-power) mode.
+ *
+ * Writes the OPERATING_MODE field of the DEVICE_CONFIG register to deep-sleep
+ * via the Zephyr PM device API. Used by the controller power-off sequence.
+ *
+ * @return 0 on success, negative errno on failure.
+ */
+int tmag5170_sleep(void);
+
 /* -------------------------------------------------------------------
  * FOC sensor interface – implemented in tmag5170_sensor.c,
  * called by haptic.c / bldc_motor.c through the sensor_t abstraction.

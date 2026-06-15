@@ -196,6 +196,22 @@ void bldc_driver_3pwm_disable(bldc_driver_3pwm_t *driver)
     driver->dc_c = 0.0f;
 }
 
+void bldc_driver_3pwm_sleep(bldc_driver_3pwm_t *driver)
+{
+    /* Zero the bridge first so no phase is left energised, then drive nSLEEP
+     * LOW to put the DRV8311H into its low-power sleep state. */
+    if (driver != NULL && driver->initialized) {
+        write_duty_cycles(g_period_ns, 0.0f, 0.0f, 0.0f);
+        driver->dc_a = 0.0f;
+        driver->dc_b = 0.0f;
+        driver->dc_c = 0.0f;
+    }
+    if (gpio_is_ready_dt(&gpio_sleep)) {
+        gpio_pin_set_dt(&gpio_sleep, 0);   /* nSLEEP LOW = sleep */
+        LOG_INF("DRV8311H nSLEEP driven LOW (sleep)");
+    }
+}
+
 void bldc_driver_3pwm_set_pwm(bldc_driver_3pwm_t *driver,
                                float ua, float ub, float uc)
 {

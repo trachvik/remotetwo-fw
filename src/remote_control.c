@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/input/input.h>
 
 LOG_MODULE_REGISTER(remote_control, LOG_LEVEL_DBG);
@@ -182,6 +183,22 @@ static hotkey_gpio_t g_hotkey_gpios[] = {
     { &g_hk_btn_south_east, CMD_BTN_CUSTOM3, "btn_south_east", false, false },
     { &g_hk_btn_west,       CMD_BTN_CUSTOM4, "btn_west",       false, false },
 };
+
+/* --- Power button: btn_north (INPUT_KEY_5). Hold 3 s while ON -> sequenced
+ * power-off + System OFF; a short press wakes the controller (= reset/boot). */
+#if DT_NODE_EXISTS(DT_NODELABEL(btn_north))
+static const struct gpio_dt_spec g_pwr_btn =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(btn_north), gpios);
+#define HAVE_PWR_BTN 1
+#else
+static const struct gpio_dt_spec g_pwr_btn = {0};
+#define HAVE_PWR_BTN 0
+#endif
+
+#define POWER_OFF_HOLD_MS 3000
+static bool    g_pwr_btn_ready    = false;
+static bool    g_pwr_btn_was_down = false;
+static int64_t g_pwr_btn_down_ms  = 0;
 
 /* --- 20-second inactivity timer: switch back to status screen --- */
 static struct k_work_delayable g_idle_disp_work;
@@ -542,13 +559,17 @@ static void send_text_gcode(const char *code)
 
 static bool hotkey_gpio_pressed(const struct gpio_dt_spec *spec)
 {
+    /* gpio_pin_get_dt() already returns the LOGICAL level (it applies the
+     * GPIO_ACTIVE_LOW inversion from the devicetree flags internally), so a
+     * return value of 1 means "active" = pressed for both active-low and
+     * active-high pins. Do NOT invert again based on GPIO_ACTIVE_LOW or the
+     * result is doubly-inverted (idle reads as "pressed"). */
     int val = gpio_pin_get_dt(spec);
     if (val < 0) {
         return false;
     }
 
-    bool active_low = (spec->dt_flags & GPIO_ACTIVE_LOW) != 0U;
-    return active_low ? (val == 0) : (val != 0);
+    return val > 0;
 }
 
 static bool hotkey_dispatch_allowed(const char *cmd)
@@ -620,6 +641,83 @@ static void hotkey_gpio_init(void)
             HAVE_HK_BTN_NORTH_EAST,
             HAVE_HK_BTN_SOUTH_EAST,
             HAVE_HK_BTN_WEST);
+}
+
+/* ---------------------------------------------------------------------------
+ * Power button (btn_north / INPUT_KEY_5)
+ *
+ * While the controller is ON, holding btn_north for POWER_OFF_HOLD_MS runs a
+ * sequenced shutdown and enters nRF System OFF:
+ *   1) haptic_shutdown()      – stop FOC loop, park motor, DRV nSLEEP LOW,
+ *                               TMAG5170 deep-sleep (register write).
+ *   2) ui_display_power_down()– OLED off, panel VCC (MIC2288) off, discharge,
+ *                               logic VDD (CTRL) off – datasheet order.
+ *   3) wait for release, arm btn_north as wake source, sys_poweroff().
+ *
+ * Waking (a short press) resets the MCU, so main() re-runs the full boot
+ * sequence = the requested wake sequence.
+ * --------------------------------------------------------------------------- */
+static void power_button_init(void)
+{
+    if (!HAVE_PWR_BTN || g_pwr_btn.port == NULL || !gpio_is_ready_dt(&g_pwr_btn)) {
+        g_pwr_btn_ready = false;
+        LOG_WRN("Power button (btn_north) not available");
+        return;
+    }
+    if (gpio_pin_configure_dt(&g_pwr_btn, GPIO_INPUT) != 0) {
+        g_pwr_btn_ready = false;
+        LOG_WRN("Power button GPIO config failed");
+        return;
+    }
+    g_pwr_btn_ready = true;
+    g_pwr_btn_was_down = hotkey_gpio_pressed(&g_pwr_btn);
+    LOG_INF("Power button ready (btn_north, hold %d ms to power off)",
+            POWER_OFF_HOLD_MS);
+}
+
+static void remote_control_power_off(void)
+{
+    LOG_INF("Power button held -> powering controller off");
+
+    /* 1) Stop FOC, park motor, sleep driver (nSLEEP LOW) + TMAG (deep-sleep). */
+    haptic_shutdown();
+
+    /* 2) Sequenced OLED shutdown: panel VCC off, discharge, then logic VDD off. */
+    ui_display_power_down();
+
+    /* 3) Wait for release so the level-sensitive wake source armed below does
+     *    not immediately wake the device, then debounce. */
+    while (hotkey_gpio_pressed(&g_pwr_btn)) {
+        k_sleep(K_MSEC(20));
+    }
+    k_sleep(K_MSEC(50));
+
+    /* 4) Arm btn_north as the System OFF wake source. The pin is active-low
+     *    (pressed = LOW), so wake on logical level active. */
+    gpio_pin_interrupt_configure_dt(&g_pwr_btn, GPIO_INT_LEVEL_ACTIVE);
+
+    LOG_INF("Entering System OFF; press power button to wake");
+
+    /* 5) Deepest sleep. Wake resets the MCU -> main() re-runs the boot/wake
+     *    sequence. sys_poweroff() does not return. */
+    sys_poweroff();
+}
+
+static void power_button_poll(void)
+{
+    if (!g_pwr_btn_ready) {
+        return;
+    }
+
+    bool down = hotkey_gpio_pressed(&g_pwr_btn);
+    int64_t now = k_uptime_get();
+
+    if (down && !g_pwr_btn_was_down) {
+        g_pwr_btn_down_ms = now;                      /* press started */
+    } else if (down && (now - g_pwr_btn_down_ms) >= POWER_OFF_HOLD_MS) {
+        remote_control_power_off();                   /* never returns */
+    }
+    g_pwr_btn_was_down = down;
 }
 
 static void send_position_delta(char axis, float delta)
@@ -1294,6 +1392,7 @@ void remote_control_init(void)
     haptic_set_step_callback(on_knob_step);
     haptic_set_virtual_click_callback(on_virtual_click);
     hotkey_gpio_init();
+    power_button_init();
     LOG_INF("Remote menu init (single click=confirm/back, double click=mode menu)");
     log_menu_state("init");
     /* Keep boot/wake default on status screen. init logging queues a menu
@@ -1305,6 +1404,7 @@ void remote_control_init(void)
 void remote_control_tick(void)
 {
     hotkey_gpio_poll();
+    power_button_poll();
 
     if (atomic_cas(&g_status_mode_pending, 1, 0)) {
         ui_display_set_mode(UI_DISP_STATUS);

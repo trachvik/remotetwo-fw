@@ -13,6 +13,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <math.h>
@@ -46,7 +47,6 @@ int tmag5170_init(struct tmag5170_device *dev)
 
 	dev->initialized = true;
 	LOG_INF("TMAG5170 encoder initialized");
-
 	/* ---- startup diagnostic: verify SPI comms + magnet strength ----
 	 * The angle noise of a Hall angle sensor scales ~ 1 / |B_xy|, where
 	 * B_xy = sqrt(Bx^2 + By^2) is the IN-PLANE field magnitude that rotates
@@ -85,6 +85,31 @@ int tmag5170_init(struct tmag5170_device *dev)
 	/* ---------------------------------------------- */
 
 	return 0;
+}
+
+int tmag5170_sleep(void)
+{
+	const struct device *tmag = DEVICE_DT_GET(DT_NODELABEL(tmag5170));
+
+	if (!device_is_ready(tmag)) {
+		return -ENODEV;
+	}
+
+#ifdef CONFIG_PM_DEVICE
+	/* SUSPEND writes OPERATING_MODE = DEEP_SLEEP into the DEVICE_CONFIG
+	 * register (handled by the upstream TMAG5170 pm_action). */
+	int ret = pm_device_action_run(tmag, PM_DEVICE_ACTION_SUSPEND);
+
+	if (ret == 0 || ret == -EALREADY) {
+		LOG_INF("TMAG5170 entered deep-sleep");
+		return 0;
+	}
+	LOG_ERR("TMAG5170 suspend failed: %d", ret);
+	return ret;
+#else
+	LOG_WRN("TMAG5170 sleep requested but CONFIG_PM_DEVICE is disabled");
+	return -ENOTSUP;
+#endif
 }
 
 /* ------------------------------------------------------------------ */

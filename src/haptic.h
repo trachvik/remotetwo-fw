@@ -8,6 +8,9 @@
 
 int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder);
 void haptic_loop(bldc_motor_t *motor);
+/* Stop the FOC loop, park the motor, and put the driver (nSLEEP) and the
+ * TMAG5170 encoder (deep-sleep) into low-power mode. Used by power-off. */
+void haptic_shutdown(void);
 int haptic_update_num_steps_from_button(void);
 int haptic_get_num_steps(void);
 void haptic_set_num_steps(int steps);

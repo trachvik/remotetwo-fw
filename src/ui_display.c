@@ -273,6 +273,28 @@ int ui_display_show_hello_remote(void)
     return 0;
 }
 
+void ui_display_power_down(void)
+{
+    /* Reverse of the power-on sequence in ui_display_init(). Per the SSD1309
+     * datasheet the high-voltage panel rail (VCC) must be removed BEFORE the
+     * logic rail (VDD):
+     *   1) Send display-off (AE) so the panel stops scanning.
+     *   2) Drop the MIC2288 boost (12.6 V VCC). 
+     *   3) Wait ~100 ms for the panel capacitance to discharge.
+     *   4) Drop the CTRL/TPS62740 logic rail (VDD) last. */
+    if (g_disp != NULL && device_is_ready(g_disp)) {
+        display_blanking_on(g_disp);   /* AE: display off */
+    }
+    if (gpio_is_ready_dt(&g_mic2288)) {
+        gpio_pin_set_dt(&g_mic2288, 0);   /* panel VCC (12.6 V) OFF */
+    }
+    k_sleep(K_MSEC(100));                  /* let the boost rail discharge */
+    if (gpio_is_ready_dt(&g_ctrl)) {
+        gpio_pin_set_dt(&g_ctrl, 0);      /* logic VDD OFF */
+    }
+    LOG_INF("OLED powered down (VCC then VDD)");
+}
+
 /* Draw a horizontal line across full width at pixel row y */
 static void fb_hline(int y)
 {

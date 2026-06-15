@@ -69,6 +69,16 @@ void bldc_driver_3pwm_enable(bldc_driver_3pwm_t *driver);
 void bldc_driver_3pwm_disable(bldc_driver_3pwm_t *driver);
 
 /**
+ * Put the DRV8311H into low-power sleep: zero all duty cycles and drive
+ * nSLEEP LOW. The bridge is disabled and the chip enters its sleep state
+ * (~uA). Used by the controller power-off sequence. Call init again (or a
+ * full reset/wake) to bring it back.
+ *
+ * @param driver  Pointer to driver structure.
+ */
+void bldc_driver_3pwm_sleep(bldc_driver_3pwm_t *driver);
+
+/**
  * Write phase voltages to hardware.
  * Voltages are clamped to [0, voltage_limit] then converted to duty cycles.
  *

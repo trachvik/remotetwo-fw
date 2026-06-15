@@ -32,4 +32,9 @@ int  ui_display_init(void);
 int  ui_display_show_hello_remote(void);
 void ui_display_process(void);
 
+/* Sequentially power the OLED down (datasheet order): blank the panel, drop the
+ * 12.6 V boost rail (MIC2288_MOS) first, let it discharge, then cut the logic
+ * rail (CTRL/TPS62740). Used by the controller power-off sequence. */
+void ui_display_power_down(void);
+
 #endif /* UI_DISPLAY_H */
