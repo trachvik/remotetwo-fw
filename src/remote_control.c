@@ -5,9 +5,12 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/input/input.h>
 
 LOG_MODULE_REGISTER(remote_control, LOG_LEVEL_DBG);
 
@@ -102,6 +105,84 @@ static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 #define SMOOTH_MENU_STEP_DIV    3
 #define DISPLAY_IDLE_TIMEOUT_MS 20000
 
+/* Gateway protocol payloads. Keep these literals aligned with
+ * remotetwo-gateway/src/protocol.py. */
+#define CMD_FILAMENT_PREHEAT_PLA   "filament:preheat:pla"
+#define CMD_FILAMENT_PREHEAT_PETG  "filament:preheat:petg"
+#define CMD_FILAMENT_LOAD          "filament:load"
+#define CMD_FILAMENT_UNLOAD        "filament:unload"
+#define CMD_CALIB_Z                "calib:z"
+#define CMD_CALIB_BED_MESH         "calib:bed_mesh"
+#define CMD_CALIB_FIRST_LAYER      "calib:first_layer"
+#define CMD_CALIB_PROBE            "calib:probe"
+#define CMD_MMU_HOME               "mmu:home"
+#define CMD_MMU_RESUME             "mmu:resume"
+#define CMD_PRINT_PAUSE            "print:pause"
+#define CMD_FAKE_POSITION          "fake:position"
+
+/* Hot-key button payloads (portable: remote sends button ID,
+ * gateway decides which G-code to execute). */
+#define CMD_BTN_CUSTOM1  "btn:custom1"   /* btn_north-west – default: PREHEAT_PLA   */
+#define CMD_BTN_CUSTOM2  "btn:custom2"   /* btn_north-east – default: home all axes */
+#define CMD_BTN_CUSTOM3  "btn:custom3"   /* btn_south-east – default: light toggle  */
+#define CMD_BTN_CUSTOM4  "btn:custom4"   /* btn_west       – default: motors off    */
+
+/* Hot-key duplicate guard to avoid double-send when both gpio-keys input
+ * callback and GPIO polling fallback see the same press. */
+static int64_t g_last_hotkey_ms = 0;
+static const char *g_last_hotkey_cmd = NULL;
+
+#if DT_NODE_EXISTS(DT_NODELABEL(btn_north_west))
+static const struct gpio_dt_spec g_hk_btn_north_west =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(btn_north_west), gpios);
+#define HAVE_HK_BTN_NORTH_WEST 1
+#else
+static const struct gpio_dt_spec g_hk_btn_north_west = {0};
+#define HAVE_HK_BTN_NORTH_WEST 0
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(btn_north_east))
+static const struct gpio_dt_spec g_hk_btn_north_east =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(btn_north_east), gpios);
+#define HAVE_HK_BTN_NORTH_EAST 1
+#else
+static const struct gpio_dt_spec g_hk_btn_north_east = {0};
+#define HAVE_HK_BTN_NORTH_EAST 0
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(btn_south_east))
+static const struct gpio_dt_spec g_hk_btn_south_east =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(btn_south_east), gpios);
+#define HAVE_HK_BTN_SOUTH_EAST 1
+#else
+static const struct gpio_dt_spec g_hk_btn_south_east = {0};
+#define HAVE_HK_BTN_SOUTH_EAST 0
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(btn_west))
+static const struct gpio_dt_spec g_hk_btn_west =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(btn_west), gpios);
+#define HAVE_HK_BTN_WEST 1
+#else
+static const struct gpio_dt_spec g_hk_btn_west = {0};
+#define HAVE_HK_BTN_WEST 0
+#endif
+
+typedef struct {
+    const struct gpio_dt_spec *spec;
+    const char *cmd;
+    const char *name;
+    bool seen_pressed;
+    bool ready;
+} hotkey_gpio_t;
+
+static hotkey_gpio_t g_hotkey_gpios[] = {
+    { &g_hk_btn_north_west, CMD_BTN_CUSTOM1, "btn_north_west", false, false },
+    { &g_hk_btn_north_east, CMD_BTN_CUSTOM2, "btn_north_east", false, false },
+    { &g_hk_btn_south_east, CMD_BTN_CUSTOM3, "btn_south_east", false, false },
+    { &g_hk_btn_west,       CMD_BTN_CUSTOM4, "btn_west",       false, false },
+};
+
 /* --- 20-second inactivity timer: switch back to status screen --- */
 static struct k_work_delayable g_idle_disp_work;
 
@@ -174,12 +255,11 @@ static void display_push_menu(void)
         names[0] = "Control";
         names[1] = "Temperature";
         names[2] = "Filament";
-        names[3] = "SD Card";
-        names[4] = "Calibration";
-        names[5] = "MMU";
-        names[6] = "Z-offset";
-        names[7] = "Macros";
-        names[8] = "Printing";
+        names[3] = "Calibration";
+        names[4] = "MMU";
+        names[5] = "Z-offset";
+        names[6] = "Macros";
+        names[7] = "Printing";
         count = ROOT_ITEM_COUNT - 1; /* skip ROOT_STATUS_MENU */
         sel = (int)g_root_sel - 1;
         if (sel < 0) sel = 0;
@@ -215,12 +295,6 @@ static void display_push_menu(void)
         names[2] = "Load"; names[3] = "Unload";
         count = FILAMENT_ITEM_COUNT;
         sel   = (int)g_filament_sel;
-        break;
-    case MENU_LEVEL_SD_CARD:
-        header = "SD Card";
-        names[0] = "(files)";
-        count = 1;
-        sel   = 0;
         break;
     case MENU_LEVEL_CALIBRATION:
         header = "Calibration";
@@ -369,7 +443,6 @@ static const char *level_name(menu_level_t level)
     case MENU_LEVEL_CONTROL_Z:    return "CONTROL_Z";
     case MENU_LEVEL_TEMPERATURE:  return "TEMPERATURE";
     case MENU_LEVEL_FILAMENT:     return "FILAMENT";
-    case MENU_LEVEL_SD_CARD:      return "SD_CARD";
     case MENU_LEVEL_CALIBRATION:  return "CALIBRATION";
     case MENU_LEVEL_MMU:          return "MMU";
     case MENU_LEVEL_MMU_LOCATE:   return "MMU_LOCATE";
@@ -388,7 +461,6 @@ static const char *root_item_name(root_item_t item)
     case ROOT_CONTROL:     return "control";
     case ROOT_TEMPERATURE: return "temperature";
     case ROOT_FILAMENT:    return "filament";
-    case ROOT_SD_CARD:     return "sd card";
     case ROOT_CALIBRATION: return "calibration";
     case ROOT_MMU:         return "mmu";
     case ROOT_ZOFFSET:     return "z-offset";
@@ -466,6 +538,88 @@ static void send_text_gcode(const char *code)
 {
     ble_send_gcode(code);
     LOG_INF("GCODE tx: %s", code);
+}
+
+static bool hotkey_gpio_pressed(const struct gpio_dt_spec *spec)
+{
+    int val = gpio_pin_get_dt(spec);
+    if (val < 0) {
+        return false;
+    }
+
+    bool active_low = (spec->dt_flags & GPIO_ACTIVE_LOW) != 0U;
+    return active_low ? (val == 0) : (val != 0);
+}
+
+static bool hotkey_dispatch_allowed(const char *cmd)
+{
+    int64_t now = k_uptime_get();
+
+    /* Suppress duplicate sends caused by bounce or by both input callback and
+     * GPIO fallback observing the same physical press. */
+    if (g_last_hotkey_cmd == cmd && (now - g_last_hotkey_ms) < 300) {
+        return false;
+    }
+
+    g_last_hotkey_cmd = cmd;
+    g_last_hotkey_ms = now;
+    return true;
+}
+
+static void dispatch_hotkey_cmd(const char *cmd)
+{
+    if (cmd == NULL || !hotkey_dispatch_allowed(cmd)) {
+        return;
+    }
+
+    LOG_INF("Hotkey: %s", cmd);
+    send_text_gcode(cmd);
+}
+
+static void hotkey_gpio_poll(void)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(g_hotkey_gpios); i++) {
+        hotkey_gpio_t *hk = &g_hotkey_gpios[i];
+
+        if (!hk->ready || hk->spec->port == NULL) {
+            continue;
+        }
+
+        bool pressed = hotkey_gpio_pressed(hk->spec);
+        if (pressed && !hk->seen_pressed) {
+            LOG_DBG("Hotkey GPIO press: %s", hk->name);
+            dispatch_hotkey_cmd(hk->cmd);
+        }
+        hk->seen_pressed = pressed;
+    }
+}
+
+static void hotkey_gpio_init(void)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(g_hotkey_gpios); i++) {
+        hotkey_gpio_t *hk = &g_hotkey_gpios[i];
+        const struct gpio_dt_spec *spec = hk->spec;
+
+        if (spec->port == NULL || !gpio_is_ready_dt(spec)) {
+            hk->ready = false;
+            continue;
+        }
+
+        if (gpio_pin_configure_dt(spec, GPIO_INPUT) != 0) {
+            hk->ready = false;
+            LOG_WRN("Hotkey GPIO init failed: %s", hk->name);
+            continue;
+        }
+
+        hk->ready = true;
+        hk->seen_pressed = hotkey_gpio_pressed(spec);
+    }
+
+    LOG_INF("Hotkey GPIO fallback init done (nw=%d ne=%d se=%d w=%d)",
+            HAVE_HK_BTN_NORTH_WEST,
+            HAVE_HK_BTN_NORTH_EAST,
+            HAVE_HK_BTN_SOUTH_EAST,
+            HAVE_HK_BTN_WEST);
 }
 
 static void send_position_delta(char axis, float delta)
@@ -682,9 +836,6 @@ static void on_knob_step(int dir)
     case MENU_LEVEL_FILAMENT:
         g_filament_sel = (filament_item_t)wrap_step_int((int)g_filament_sel, FILAMENT_ITEM_COUNT, dir);
         break;
-    case MENU_LEVEL_SD_CARD:
-        /* SD card file list — not yet implemented, no navigation */
-        break;
     case MENU_LEVEL_CALIBRATION:
         g_calib_sel = (calibration_item_t)wrap_step_int((int)g_calib_sel, CALIB_ITEM_COUNT, dir);
         break;
@@ -746,10 +897,6 @@ static void on_confirm_action(void)
         case ROOT_FILAMENT:
             g_level = MENU_LEVEL_FILAMENT;
             g_filament_sel = FILAMENT_PREHEAT_PLA;
-            log_menu_state("enter submenu");
-            return;
-        case ROOT_SD_CARD:
-            g_level = MENU_LEVEL_SD_CARD;
             log_menu_state("enter submenu");
             return;
         case ROOT_CALIBRATION:
@@ -849,28 +996,28 @@ static void on_confirm_action(void)
 
     if (g_level == MENU_LEVEL_FILAMENT) {
         switch (g_filament_sel) {
-        case FILAMENT_PREHEAT_PLA:  send_simple_gcode("filament:preheat:pla");  log_menu_state("preheat pla");  return;
-        case FILAMENT_PREHEAT_PETG: send_simple_gcode("filament:preheat:petg"); log_menu_state("preheat petg"); return;
-        case FILAMENT_LOAD:         send_simple_gcode("filament:load");         log_menu_state("load");         return;
-        case FILAMENT_UNLOAD:       send_simple_gcode("filament:unload");       log_menu_state("unload");       return;
+        case FILAMENT_PREHEAT_PLA:  send_simple_gcode(CMD_FILAMENT_PREHEAT_PLA);  log_menu_state("preheat pla");  return;
+        case FILAMENT_PREHEAT_PETG: send_simple_gcode(CMD_FILAMENT_PREHEAT_PETG); log_menu_state("preheat petg"); return;
+        case FILAMENT_LOAD:         send_simple_gcode(CMD_FILAMENT_LOAD);         log_menu_state("load");         return;
+        case FILAMENT_UNLOAD:       send_simple_gcode(CMD_FILAMENT_UNLOAD);       log_menu_state("unload");       return;
         default: return;
         }
     }
 
     if (g_level == MENU_LEVEL_CALIBRATION) {
         switch (g_calib_sel) {
-        case CALIB_Z:           send_simple_gcode("calib:z");           log_menu_state("calib z");           return;
-        case CALIB_BED_MESH:    send_simple_gcode("calib:bed_mesh");    log_menu_state("calib bed mesh");    return;
-        case CALIB_FIRST_LAYER: send_simple_gcode("calib:first_layer"); log_menu_state("calib first layer"); return;
-        case CALIB_PROBE:       send_simple_gcode("calib:probe");       log_menu_state("calib probe");       return;
+        case CALIB_Z:           send_simple_gcode(CMD_CALIB_Z);           log_menu_state("calib z");           return;
+        case CALIB_BED_MESH:    send_simple_gcode(CMD_CALIB_BED_MESH);    log_menu_state("calib bed mesh");    return;
+        case CALIB_FIRST_LAYER: send_simple_gcode(CMD_CALIB_FIRST_LAYER); log_menu_state("calib first layer"); return;
+        case CALIB_PROBE:       send_simple_gcode(CMD_CALIB_PROBE);       log_menu_state("calib probe");       return;
         default: return;
         }
     }
 
     if (g_level == MENU_LEVEL_MMU) {
         switch (g_mmu_sel) {
-        case MMU_HOME:    send_simple_gcode("mmu:home");   log_menu_state("mmu home");   return;
-        case MMU_RESUME:  send_simple_gcode("mmu:resume"); log_menu_state("mmu resume"); return;
+        case MMU_HOME:    send_simple_gcode(CMD_MMU_HOME);   log_menu_state("mmu home");   return;
+        case MMU_RESUME:  send_simple_gcode(CMD_MMU_RESUME); log_menu_state("mmu resume"); return;
         case MMU_LOCATE_SELECTOR:
             g_level = MENU_LEVEL_MMU_LOCATE;
             g_mmu_tool_sel = MMU_T0;
@@ -913,7 +1060,7 @@ static void on_confirm_action(void)
             log_menu_state("light toggled");
             return;
         case MACROS_FAKE_POSITION:
-            send_simple_gcode("fake:position");
+            send_simple_gcode(CMD_FAKE_POSITION);
             log_menu_state("fake position");
             return;
         default: return;
@@ -930,7 +1077,7 @@ static void on_confirm_action(void)
 
     if (g_level == MENU_LEVEL_PRINTING) {
         switch (g_printing_sel) {
-        case PRINTING_PAUSE: send_simple_gcode("print:pause"); log_menu_state("print pause"); return;
+        case PRINTING_PAUSE: send_simple_gcode(CMD_PRINT_PAUSE); log_menu_state("print pause"); return;
         case PRINTING_FLOW:  enter_edit_mode(EDIT_FLOW);  return;
         case PRINTING_SPEED: enter_edit_mode(EDIT_SPEED); return;
         default: return;
@@ -989,11 +1136,6 @@ static void on_back_action(void)
     case MENU_LEVEL_FILAMENT:
         g_level = MENU_LEVEL_ROOT;
         g_root_sel = ROOT_FILAMENT;
-        log_menu_state("back");
-        return;
-    case MENU_LEVEL_SD_CARD:
-        g_level = MENU_LEVEL_ROOT;
-        g_root_sel = ROOT_SD_CARD;
         log_menu_state("back");
         return;
     case MENU_LEVEL_CALIBRATION:
@@ -1082,6 +1224,44 @@ static void click_eval_work_handler(struct k_work *work)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Physical hot-key buttons.
+ *
+ * Each button sends a generic btn:customN payload so the gateway decides
+ * what G-code to execute.  Mapping (from overlay zephyr,code values):
+ *   INPUT_KEY_4  btn_north-west  → btn:custom1  (default: PREHEAT_PLA)
+ *   INPUT_KEY_6  btn_north-east  → btn:custom2  (default: G28 home all)
+ *   INPUT_KEY_7  btn_south-east  → btn:custom3  (default: light toggle)
+ *   INPUT_KEY_3  btn_west        → btn:custom4  (default: M84 motors off)
+ *
+ * The callback is registered at startup via INPUT_CALLBACK_DEFINE (before
+ * remote_control_init).  send_text_gcode + ui_display_flash_confirm are both
+ * thread-safe so calling from the input work-queue is fine.
+ * --------------------------------------------------------------------------- */
+static void on_hotkey(struct input_event *evt, void *user_data)
+{
+    ARG_UNUSED(user_data);
+
+    /* Only process key-press events, ignore releases and non-key events. */
+    if (evt->type != INPUT_EV_KEY || evt->value == 0) {
+        return;
+    }
+
+    const char *cmd = NULL;
+    switch (evt->code) {
+    case INPUT_KEY_4: cmd = CMD_BTN_CUSTOM1; break;
+    case INPUT_KEY_6: cmd = CMD_BTN_CUSTOM2; break;
+    case INPUT_KEY_7: cmd = CMD_BTN_CUSTOM3; break;
+    case INPUT_KEY_3: cmd = CMD_BTN_CUSTOM4; break;
+    default: break;
+    }
+
+    if (cmd != NULL) {
+        dispatch_hotkey_cmd(cmd);
+    }
+}
+INPUT_CALLBACK_DEFINE(NULL, on_hotkey, NULL);
+
 void remote_control_init(void)
 {
     /* BLE is brought up by main() BEFORE this call (with the 300 ms RF settle
@@ -1113,6 +1293,7 @@ void remote_control_init(void)
     k_work_init_delayable(&g_idle_disp_work, idle_disp_work_handler);
     haptic_set_step_callback(on_knob_step);
     haptic_set_virtual_click_callback(on_virtual_click);
+    hotkey_gpio_init();
     LOG_INF("Remote menu init (single click=confirm/back, double click=mode menu)");
     log_menu_state("init");
     /* Keep boot/wake default on status screen. init logging queues a menu
@@ -1123,6 +1304,8 @@ void remote_control_init(void)
 
 void remote_control_tick(void)
 {
+    hotkey_gpio_poll();
+
     if (atomic_cas(&g_status_mode_pending, 1, 0)) {
         ui_display_set_mode(UI_DISP_STATUS);
     }

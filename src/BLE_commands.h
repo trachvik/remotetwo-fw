@@ -22,6 +22,8 @@ struct ble_printer_state {
 
 	float temp_e;        /* extruder temperature [°C] */
 	float temp_b;        /* bed temperature [°C] */
+	float temp_e_target; /* extruder target temperature [°C] */
+	float temp_b_target; /* bed target temperature [°C] */
 
 	float fan_pct;       /* part cooling fan 0-100 % */
 	float feed_rate_pct; /* feed rate override 0-999 % */

@@ -20,6 +20,7 @@ LOG_MODULE_REGISTER(ble_commands, LOG_LEVEL_DBG);
 #define BLE_TX_QUEUE_LEN      16
 #define BLE_TX_STACK_SIZE   1024
 #define BLE_TX_THREAD_PRIO    7
+#define BLE_NUS_CHUNK_LEN     20
 
 /* Receive reassembly buffer — accumulates incoming BLE chunks until \n. */
 #define NUS_RX_BUF_SIZE     256
@@ -159,6 +160,8 @@ static void parse_state_temp(char *saveptr)
 {
     float te = g_state.temp_e;
     float tb = g_state.temp_b;
+    float te_tgt = g_state.temp_e_target;
+    float tb_tgt = g_state.temp_b_target;
 
     while (1) {
         char *name = strtok_r(NULL, ":", &saveptr);
@@ -176,6 +179,10 @@ static void parse_state_temp(char *saveptr)
             te = parsed;
         } else if (strcmp(name, "b") == 0) {
             tb = parsed;
+        } else if (strcmp(name, "et") == 0 || strcmp(name, "e_target") == 0) {
+            te_tgt = parsed;
+        } else if (strcmp(name, "bt") == 0 || strcmp(name, "b_target") == 0) {
+            tb_tgt = parsed;
         }
     }
 
@@ -183,6 +190,8 @@ static void parse_state_temp(char *saveptr)
     g_state.valid = true;
     g_state.temp_e = te;
     g_state.temp_b = tb;
+    g_state.temp_e_target = te_tgt;
+    g_state.temp_b_target = tb_tgt;
     k_mutex_unlock(&g_proto_lock);
 }
 
@@ -235,7 +244,7 @@ static void parse_state_message(char *msg)
 
     if (strcmp(subtype, "pos") == 0) {
         parse_state_pos(saveptr);
-    } else if (strcmp(subtype, "temp") == 0) {
+    } else if (strcmp(subtype, "temp") == 0 || strcmp(subtype, "temp_target") == 0) {
         parse_state_temp(saveptr);
     } else if (strcmp(subtype, "homed") == 0) {
         parse_state_homed(saveptr);
@@ -388,9 +397,18 @@ static void ble_tx_thread_fn(void *p1, void *p2, void *p3)
         }
 
         struct bt_conn *conn = bt_conn_ref(g_current_conn);
-        int ret = bt_nus_send(conn, msg.payload, msg.len);
-        if (ret != 0) {
-            LOG_WRN("bt_nus_send failed (%d)", ret);
+        int ret = 0;
+        for (uint8_t off = 0; off < msg.len; off += BLE_NUS_CHUNK_LEN) {
+            uint8_t chunk_len = msg.len - off;
+            if (chunk_len > BLE_NUS_CHUNK_LEN) {
+                chunk_len = BLE_NUS_CHUNK_LEN;
+            }
+
+            ret = bt_nus_send(conn, &msg.payload[off], chunk_len);
+            if (ret != 0) {
+                LOG_WRN("bt_nus_send failed (%d), off=%u len=%u", ret, off, chunk_len);
+                break;
+            }
         }
 
         bt_conn_unref(conn);

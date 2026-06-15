@@ -134,6 +134,28 @@ speed:<percent>   //M220 S<percent>
 fake:position   //SET_KINEMATIC_POSITION X=150 Y=150 Z=10
 ```
 
+### Physical hot-key buttons
+
+Four physical buttons send a portable button-ID command. The remote only reports
+which button was pressed; the concrete G-code is assigned on the gateway side
+(overridable via `--custom1-gcode` … `--custom4-gcode` CLI flags).
+
+```text
+btn:custom1   // btn_north-west  – default: PREHEAT_PLA
+btn:custom2   // btn_north-east  – default: G28 (home all axes)
+btn:custom3   // btn_south-east  – default: TOGGLE_LIGHT (light on/off)
+btn:custom4   // btn_west        – default: M84 (motors off)
+```
+
+Button-to-GPIO mapping (from `remotetwo_nrf5340_cpuapp_ns.overlay`):
+
+| Command      | Label            | GPIO   | INPUT_KEY |
+|-------------|-----------------|--------|-----------|
+| btn:custom1 | btn_north-west  | P0.20  | KEY_4     |
+| btn:custom2 | btn_north-east  | P1.12  | KEY_6     |
+| btn:custom3 | btn_south-east  | P0.19  | KEY_7     |
+| btn:custom4 | btn_west        | P1.08  | KEY_3     |
+
 ## Input Commands (Raspberry Pi -> nRF5340)
 
 `state:` is the preferred prefix. For compatibility during testing, `status:` is accepted as an alias.

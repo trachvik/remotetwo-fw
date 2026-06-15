@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <math.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/device.h>
@@ -392,6 +393,16 @@ static const uint8_t icon_bed[5]    = { 0x34, 0x04, 0x04, 0x04, 0x34 };
 static const uint8_t icon_fan[5]    = { 0x15, 0x0E, 0x1F, 0x0E, 0x15 };
 static const uint8_t icon_feed[5]   = { 0x0E, 0x11, 0x15, 0x15, 0x02 };
 
+static void format_temp(char *out, size_t out_len, float current, float target)
+{
+    /* Show setpoint only when it is meaningfully different from measured value. */
+    if (target > 0.0f && fabsf(target - current) >= 0.5f) {
+        (void)snprintf(out, out_len, "%.0f->%.0f'", (double)current, (double)target);
+    } else {
+        (void)snprintf(out, out_len, "%.0f'", (double)current);
+    }
+}
+
 static void render_status(void)
 {
     memset(g_fb, 0x00, BUF_LEN);
@@ -402,7 +413,7 @@ static void render_status(void)
     /* ---- Row 0 (y=2): hotend icon | temp | fan icon | fan% ---- */
     fb_icon_5x7(2, 2, icon_hotend);
     if (s->valid) {
-        (void)snprintf(buf, sizeof(buf), "%3.0f'", (double)s->temp_e);
+        format_temp(buf, sizeof(buf), s->temp_e, s->temp_e_target);
     } else {
         (void)strncpy(buf, "---", sizeof(buf));
     }
@@ -419,7 +430,7 @@ static void render_status(void)
     /* ---- Row 1 (y=13): bed icon | temp | feed icon | feed% ---- */
     fb_icon_5x7(2, 13, icon_bed);
     if (s->valid) {
-        (void)snprintf(buf, sizeof(buf), "%3.0f'", (double)s->temp_b);
+        format_temp(buf, sizeof(buf), s->temp_b, s->temp_b_target);
     } else {
         (void)strncpy(buf, "---", sizeof(buf));
     }
