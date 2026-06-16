@@ -1,5 +1,6 @@
 #include "bldc_motor.h"
 #include "bldc_driver_3pwm.h"
+#include "current_sense.h"
 #include <string.h>
 #include <math.h>
 #include <arm_math.h>
@@ -164,47 +165,47 @@ void pid_controller_init(pid_controller_t *pid, float p, float i, float d, float
 /**
  * PID controller operator
  */
-// float pid_controller_operator(pid_controller_t *pid, float error)
-// {
-//     if (pid == NULL) return 0.0f;
-    
-//     unsigned long timestamp = micros();
-//     float ts = (timestamp - pid->timestamp_prev) * 1e-6f;
-    
-//     if (ts <= 0.0f || ts > 0.5f) ts = 1e-3f;
-    
-//     /* Proportional term */
-//     float proportional = pid->p * error;
-    
-//     /* Integral term */
-//     float integral = pid->integral_prev + pid->i * ts * 0.5f * (error + pid->error_prev);
-//     integral = _CONSTRAIN(integral, -pid->limit, pid->limit);
-    
-//     /* Derivative term */
-//     float derivative = pid->d * (error - pid->error_prev) / ts;
-    
-//     /* Calculate output */
-//     float output = proportional + integral + derivative;
-//     output = _CONSTRAIN(output, -pid->limit, pid->limit);
-    
-//     /* Apply ramp limit */
-//     if (pid->output_ramp > 0) {
-//         float output_rate = (output - pid->output_prev) / ts;
-//         if (output_rate > pid->output_ramp) {
-//             output = pid->output_prev + pid->output_ramp * ts;
-//         } else if (output_rate < -pid->output_ramp) {
-//             output = pid->output_prev - pid->output_ramp * ts;
-//         }
-//     }
-    
-//     /* Save state */
-//     pid->integral_prev = integral;
-//     pid->output_prev = output;
-//     pid->error_prev = error;
-//     pid->timestamp_prev = timestamp;
-    
-//     return output;
-// }
+float pid_controller_operator(pid_controller_t *pid, float error)
+{
+    if (pid == NULL) return 0.0f;
+
+    unsigned long timestamp = micros();
+    float ts = (timestamp - pid->timestamp_prev) * 1e-6f;
+
+    if (ts <= 0.0f || ts > 0.5f) ts = 1e-3f;
+
+    /* Proportional term */
+    float proportional = pid->p * error;
+
+    /* Integral term (trapezoidal), anti-windup clamp to output limit */
+    float integral = pid->integral_prev + pid->i * ts * 0.5f * (error + pid->error_prev);
+    integral = _CONSTRAIN(integral, -pid->limit, pid->limit);
+
+    /* Derivative term */
+    float derivative = pid->d * (error - pid->error_prev) / ts;
+
+    /* Calculate output */
+    float output = proportional + integral + derivative;
+    output = _CONSTRAIN(output, -pid->limit, pid->limit);
+
+    /* Apply ramp limit */
+    if (pid->output_ramp > 0) {
+        float output_rate = (output - pid->output_prev) / ts;
+        if (output_rate > pid->output_ramp) {
+            output = pid->output_prev + pid->output_ramp * ts;
+        } else if (output_rate < -pid->output_ramp) {
+            output = pid->output_prev - pid->output_ramp * ts;
+        }
+    }
+
+    /* Save state */
+    pid->integral_prev = integral;
+    pid->output_prev = output;
+    pid->error_prev = error;
+    pid->timestamp_prev = timestamp;
+
+    return output;
+}
 
 /**
  * PID controller reset
@@ -656,12 +657,6 @@ void bldc_motor_loop_foc(bldc_motor_t *motor)
     /* Sensor is read (and cached) externally before calling this function.
      * sensor_update() must be called once per cycle by the caller. */
     
-    /* If open-loop or disabled, do nothing */
-    /*if (motor->controller == VELOCITY_OPENLOOP || 
-        motor->controller == ANGLE_OPENLOOP) {
-        return;
-    }*/
-    
     /* If disabled, do nothing */
     if (!motor->enabled) {
         return;
@@ -669,10 +664,108 @@ void bldc_motor_loop_foc(bldc_motor_t *motor)
     
     /* Calculate electrical angle from sensor */
     motor->electrical_angle = bldc_motor_electrical_angle(motor);
-    
-    /* Apply the phase voltages that were calculated in move() */
-    /* voltage.q and voltage.d are set by move() */
+
+    /* Torque source: voltage (open-loop) or FOC current (closed current loop). */
+    if (motor->torque_controller == FOC_CURRENT) {
+        static unsigned int foc_cyc = 0;
+
+        if (current_sense_is_ready()) {
+            /* --- Real FOC current control (SimpleFOC loopFOC foc_current case) --- */
+            float id_meas = 0.0f, iq_meas = 0.0f;
+            current_sense_get_foc_currents(motor->electrical_angle, &id_meas, &iq_meas);
+
+            motor->current.q = lowpass_filter_operator(&motor->lpf_current_q, iq_meas);
+            motor->current.d = lowpass_filter_operator(&motor->lpf_current_d, id_meas);
+
+            motor->voltage.q = pid_controller_operator(&motor->pid_current_q,
+                                                        motor->current_sp - motor->current.q);
+            motor->voltage.d = pid_controller_operator(&motor->pid_current_d,
+                                                        -motor->current.d);
+
+            /* PROOF that the current loop is really running (not a silent voltage
+             * fallback): once per ~second, dump the measured d/q currents and the
+             * resulting voltage commands. Iq/Id are physically measured from the
+             * SAADC and respond to load - impossible to fake in voltage mode. */
+            if ((foc_cyc++ % 1000u) == 0u) {
+                float va = 0, vb = 0, vc = 0;
+                current_sense_get_raw_volts(&va, &vb, &vc);
+                phase_current_t pc = current_sense_get_phase_currents();
+                LOG_INF("FOC_CURRENT RUNNING cyc=%u Isp=%.3fA Iq=%.3fA Id=%.3fA -> Uq=%.2fV Ud=%.2fV",
+                        foc_cyc,
+                        (double)motor->current_sp,
+                        (double)motor->current.q, (double)motor->current.d,
+                        (double)motor->voltage.q, (double)motor->voltage.d);
+                LOG_INF("   raw SOA=%.3f SOB=%.3f SOC=%.3f V | Ia=%.3f Ib=%.3f Ic=%.3f A | scans=%u",
+                        (double)va, (double)vb, (double)vc,
+                        (double)pc.a, (double)pc.b, (double)pc.c,
+                        current_sense_get_scan_count());
+            }
+        } else {
+            /* Current sense NOT available. Do NOT pretend we are in current
+             * control. Drive a voltage so the knob still works, but SHOUT about
+             * it every second so a broken current loop can never hide. */
+            motor->voltage.q = _CONSTRAIN(motor->target, -motor->voltage_limit, motor->voltage_limit);
+            motor->voltage.d = 0.0f;
+            if ((foc_cyc++ % 1000u) == 0u) {
+                LOG_WRN("### CURRENT CONTROL UNAVAILABLE - SAADC not ready - running VOLTAGE fallback (NOT current control!) ###");
+            }
+        }
+    }
+    /* else VOLTAGE mode: voltage.q / voltage.d were already set by move(). */
+
+    /* Apply the phase voltages using the fresh electrical angle. */
     bldc_motor_set_phase_voltage(motor, motor->voltage.q, motor->voltage.d, motor->electrical_angle);
+}
+
+/**
+ * Align the current-sense polarity to the driver (SimpleFOC driverAlign).
+ * Drives the alpha (phase-A) axis with a known positive voltage and checks that
+ * the measured phase-A current is positive; flips the gain sign if not.
+ */
+int bldc_motor_align_current_sense(bldc_motor_t *motor)
+{
+    if (motor == NULL || motor->driver == NULL) return 0;
+    if (!current_sense_is_ready()) {
+        LOG_WRN("current-sense align skipped: SAADC not ready");
+        return 0;
+    }
+
+    float v = motor->voltage_sensor_align;
+
+    /* Ramp a voltage onto the alpha axis: set_phase_voltage(uq=0, ud=v, angle=0)
+     * => u_alpha = v, so phase A is driven high vs B/C and phase-A current
+     * should be physically positive. */
+    for (int i = 0; i <= 100; i++) {
+        bldc_motor_set_phase_voltage(motor, 0.0f, v * (float)i / 100.0f, 0.0f);
+        k_msleep(2);
+    }
+    k_msleep(200);
+
+    /* Average phase-A current over many reads to beat noise. */
+    float ia = 0.0f;
+    const int rounds = 200;
+    for (int i = 0; i < rounds; i++) {
+        phase_current_t c = current_sense_get_phase_currents();
+        ia += c.a;
+        k_msleep(1);
+    }
+    ia /= (float)rounds;
+
+    /* Ramp the voltage back down and stop. */
+    for (int i = 100; i >= 0; i--) {
+        bldc_motor_set_phase_voltage(motor, 0.0f, v * (float)i / 100.0f, 0.0f);
+        k_msleep(2);
+    }
+    bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
+
+    /* Note: ia here was read WITH the current default sign applied (+1). */
+    float raw_ia = ia * current_sense_get_gain_sign();
+    float sign = (raw_ia < 0.0f) ? -1.0f : 1.0f;
+    current_sense_set_gain_sign(sign);
+
+    LOG_INF("current-sense align: Ia(alpha-drive)=%.3f A -> gain_sign=%+.0f",
+            (double)raw_ia, (double)sign);
+    return 1;
 }
 
 /**

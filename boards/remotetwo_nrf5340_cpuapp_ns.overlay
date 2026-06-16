@@ -17,7 +17,13 @@
  *
  * PWM1  - DRV8311 common low-side INL
  *   INL -> P0.18
+ *
+ * SAADC - DRV8311H current-sense amplifier outputs (FOC current control)
+ *   SOA -> P0.27 (AIN6)   SOB -> P0.26 (AIN5)   SOC -> P0.25 (AIN4)
  */
+
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
 
  /* Define main console - USB */
 / {
@@ -234,6 +240,55 @@
 	pinctrl-0 = <&pwm0_default>;
 	pinctrl-1 = <&pwm0_sleep>;
 	pinctrl-names = "default", "sleep";
+};
+
+/* ================================================================
+ * SAADC – DRV8311H current-sense amplifier outputs (FOC current control)
+ *   SOA = P0.27 = AIN6 (channel 0)
+ *   SOB = P0.26 = AIN5 (channel 1)
+ *   SOC = P0.25 = AIN4 (channel 2)
+ * CSA gain = 2 V/A, bidirectional, output biased near AVDD/2.
+ * Internal 0.6 V reference + gain 1/6 => full-scale 3.6 V single-ended,
+ * which spans the 0..3.3 V CSA output with headroom. 12-bit resolution.
+ * ================================================================ */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN6>;   /* SOA – P0.27 */
+		zephyr,resolution = <12>;
+	};
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN5>;   /* SOB – P0.26 */
+		zephyr,resolution = <12>;
+	};
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN4>;   /* SOC – P0.25 */
+		zephyr,resolution = <12>;
+	};
+};
+
+/ {
+	/* Phandle bundle the current-sense driver grabs the three ADC channels from.
+	 * Node MUST be named "zephyr,user" (no compatible) so the devicetree type
+	 * inference recognises io-channels as a phandle-array. IDX 0/1/2 = SOA/SOB/SOC. */
+	zephyr_user: zephyr,user {
+		io-channels = <&adc 0>, <&adc 1>, <&adc 2>;
+	};
 };
 
 / {
