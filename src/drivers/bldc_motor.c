@@ -366,12 +366,14 @@ float bldc_motor_shaft_velocity(bldc_motor_t *motor)
 }
 
 /**
- * Calculate electrical angle
- */
+ * Calculate electrical angle.
+ * The mechanical angle is already smoothed by the sensor-layer tracking observer
+ * (see tmag5170_sensor.c), so commutation gets a clean angle here without an
+ * extra low-pass that would add torque-angle lag. */
 float bldc_motor_electrical_angle(bldc_motor_t *motor)
 {
     if (motor == NULL) return 0.0f;
-    
+
     float angle = bldc_motor_shaft_angle(motor) * motor->pole_pairs - motor->zero_electric_angle;
     return normalize_angle(angle);
 }

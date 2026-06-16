@@ -35,27 +35,36 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5 deg, no PWM output */
 #define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* smooth force ramp from 0 to full between 0.5 and 2.5 deg */
 #define HAPTIC_DETENT_AMP_V 1.0f    /* peak spring voltage in detent mode */
-#define DETENT_KV           0.20f   /* V*s/rad velocity damping in detent mode.
-                                     * Raised from 0.08f to critically damp the spring so the knob
-                                     * settles instead of ringing after a flick/release. */
-#define VEL_LPF_ALPHA       0.18f   /* fast velocity IIR in detent mode, ~31 Hz BW.
-                                     * Raised from 0.1f: less phase lag in the damping path so
-                                     * the damping force stays in phase with the oscillation and
-                                     * actually removes energy instead of feeding a limit cycle. */
+#define DETENT_KV           0.12f   /* V*s/rad velocity damping in detent mode. Moderate: enough to
+                                     * stop the spring ringing, low enough that encoder velocity
+                                     * noise does not become audible torque ripple. */
+#define VEL_LPF_ALPHA       0.15f   /* fast velocity IIR in detent mode, ~25 Hz BW.
+                                     * Balance: enough smoothing to keep the differentiated-encoder
+                                     * velocity quiet, little enough phase lag that damping does not
+                                     * lag the motion and re-excite a limit cycle. */
 #define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz, tau about 10 ms */
-#define DETENT_IIR_ALPHA    0.22f   /* output IIR in detent mode, tau ~3.5 ms (~45 Hz).
-                                     * Lowered from 0.30f: the extra output low-pass kills the
-                                     * high-frequency self-excited buzz/limit-cycle that voltage
-                                     * mode shows after a flick, at the cost of slightly softer
-                                     * detent snap. Lower further (0.15) if buzz persists. */
-#define DETENT_VEL_DEADBAND 0.02f   /* rad/s: null only true at-rest encoder jitter. Kept small:
-                                     * a large deadband removed damping from SMALL oscillations,
-                                     * which is exactly what let a lightly-sprung knob ring. */
-#define DETENT_SPRING_POS_ALPHA 0.30f /* 1-pole LPF (~60 Hz @1kHz) on the position used ONLY for
-                                       * the spring force. Cuts encoder position noise (which the
-                                       * steep spring slope turns into audible buzz) while keeping
-                                       * hand motion (<15 Hz) intact. Navigation/step counting
-                                       * stays on the raw angle so detent counting is crisp. */
+#define DETENT_IIR_ALPHA    0.16f   /* output IIR on the SPRING force in detent mode, ~28 Hz.
+                                     * Lowered from 0.22f: the steep detent spring slope amplifies
+                                     * encoder noise into audible "robotic" torque ripple; smoothing
+                                     * the spring force harder removes that ripple. Damping is added
+                                     * AFTER this filter (stays fast) so detents do not ring.
+                                     * Raise toward 0.22f if the detent snap feels too soft. */
+#define DETENT_VEL_DB       0.10f   /* rad/s soft-deadband scale for the damping velocity. NOT a
+                                     * hard cutoff: a hard deadband toggled damping on/off as the
+                                     * velocity crossed the threshold, which produced the "robotic"
+                                     * stepping sound and a limit cycle. The soft version
+                                     * v_eff = v*v^2/(v^2+DB^2) tapers small (noise) velocity
+                                     * smoothly to zero with NO discontinuity, so there is nothing
+                                     * to step or chatter. */
+#define DETENT_SPRING_POS_ALPHA 0.15f /* 1-pole LPF (~30 Hz @1kHz) on the position used ONLY for
+                                       * the spring force. This is the PRIMARY robotic-sound fix:
+                                       * the steep spring slope (AMP*2pi/step_size) multiplies any
+                                       * position noise into force noise, worse with more steps, so
+                                       * the noise must be filtered HERE, before the slope amplifies
+                                       * it. ~30 Hz is still far above hand-turn speed (<10 Hz) so the
+                                       * detent center does not visibly lag the finger. Navigation /
+                                       * step counting stays on the raw angle so counting is crisp.
+                                       * Raise toward 0.30f if detents feel laggy/mushy. */
 
 /* PWM pin definitions removed, hardware is fully described in the board overlay. */
 
@@ -580,12 +589,21 @@ void haptic_loop(bldc_motor_t *motor)
 
         /* Velocity damping term, kept OUT of the output IIR so it has minimal phase lag
          * and can actually remove oscillation energy (a delayed damping force feeds the
-         * limit cycle instead of killing it). */
-        float v_damp = haptic_inst_vel;
-        if (v_damp > -DETENT_VEL_DEADBAND && v_damp < DETENT_VEL_DEADBAND) {
-            v_damp = 0.0f;
-        }
-        float damp_v = -DETENT_KV * v_damp;
+         * limit cycle instead of killing it).
+         * Soft deadband v_eff = v * v^2/(v^2 + DB^2): tapers noise-level velocity smoothly
+         * to zero (no hard on/off step that would grind/chatter), while full-speed motion
+         * passes through almost unchanged and stays damped.
+         * Velocity = haptic_inst_vel, which is the time-derivative of the ALREADY-smoothed
+         * PLL angle (sensor_get_angle now returns the observer angle). That gives a clean
+         * velocity with only the small angle-lag, WITHOUT the extra ~90deg phase lag of the
+         * PLL's omega integrator. Using the lagged omega here turned the damping into a
+         * delayed (effectively negative-damping) force that self-excited a limit cycle =
+         * the oscillation. The derivative-of-clean-angle avoids both the buzz and the
+         * oscillation. */
+        float v_raw  = haptic_inst_vel;
+        float v_eff  = v_raw * (v_raw * v_raw) /
+                       (v_raw * v_raw + DETENT_VEL_DB * DETENT_VEL_DB);
+        float damp_v = -DETENT_KV * v_eff;
 
         /* Spring force from a lightly low-pass-filtered position. The raw encoder angle
          * has ~tenths-of-a-degree noise; the steep spring slope turns that into audible
@@ -601,9 +619,14 @@ void haptic_loop(bldc_motor_t *motor)
 
             float spring_norm = (detent_spring_pos - detent_origin) / step_size;
             float spring_err  = spring_norm - roundf(spring_norm);
-            float abs_err_rad = fabsf(spring_err * step_size);
-            float blend = haptic_blend(abs_err_rad, HAPTIC_ZERO_ZONE_RAD, HAPTIC_BLEND_ZONE_RAD);
-            spring_v = -blend * HAPTIC_DETENT_AMP_V * sinf(_2PI * spring_err);
+            /* Pure sinusoidal detent: F = -A*sin(2*pi*err).
+             * Smooth everywhere, naturally zero at the detent centre (err=0) and at the
+             * boundary (err=+-0.5), with the steepest restoring gradient through the centre.
+             * No dead-zone/blend gate: that gate flattened the force near every centre and
+             * added harmonics to the sine = the "robotic" sound, worse with more steps.
+             * At-rest encoder noise is handled by the position LPF (detent_spring_pos),
+             * not by gating the force, so the profile stays a clean sinusoid. */
+            spring_v = -HAPTIC_DETENT_AMP_V * sinf(_2PI * spring_err);
         }
 
         /* Output IIR smooths the SPRING force only (its job is to kill the HF buzz the

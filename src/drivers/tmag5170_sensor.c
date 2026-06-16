@@ -25,8 +25,14 @@ LOG_MODULE_REGISTER(tmag5170_sensor, LOG_LEVEL_INF);
 #define M_PI 3.14159265358979323846
 #endif
 
-/* 500 Hz rate limit – update at most once every 2 ms */
-#define SENSOR_UPDATE_MIN_INTERVAL_US  2000
+/* Sensor read cap. MUST be <= the haptic loop period (1 ms @ 1 kHz), otherwise
+ * every other haptic tick gets a STALE cached angle: d_ang then alternates
+ * 0, 2x, 0, 2x... which injects a 500 Hz ripple into the differentiated velocity
+ * and, through the (fast) detent damping term, becomes an audible "robotic" whine
+ * while turning. 800 us caps at ~1.25 kHz so a fresh SPI read is always available
+ * at the 1 ms loop cadence (with margin for timer jitter). HSPI/SPIM4 makes the
+ * read fast enough to do every tick. */
+#define SENSOR_UPDATE_MIN_INTERVAL_US  800
 
 /* ---- Direct register-write deep-sleep ----------------------------------
  * CONFIG_PM_DEVICE perturbs early device init on this target (the app then
@@ -51,8 +57,27 @@ static const struct spi_dt_spec g_tmag_spi =
 			SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB | SPI_WORD_SET(8),
 			0);
 
-static float   g_cached_angle_rad  = 0.0f;
+static float   g_cached_angle_rad  = 0.0f;   /* raw CORDIC angle, rad [0,2pi) */
 static int64_t g_last_update_us    = 0;
+
+/* ---- Angle tracking observer (type-II PLL) -----------------------------
+ * The TMAG CORDIC angle is noisy (a fraction of a degree even with 32x
+ * oversampling). That noise is amplified x pole_pairs (11) into the
+ * commutation voltage vector AND, once differentiated, into the velocity used
+ * for haptic damping => an audible + felt "robotic" vibration whenever torque
+ * is applied. A plain low-pass would remove the noise but lag the angle while
+ * turning (torque-angle error / drag). A type-II PLL instead TRACKS the angle:
+ * its internal velocity integrator means ZERO steady-state lag at constant
+ * turning speed, while still rejecting the broadband measurement noise. The
+ * observer outputs both a smooth angle (sensor_get_angle) and a smooth velocity
+ * (sensor_get_velocity), so commutation and damping are both clean at the
+ * source instead of being patched with downstream filters. */
+#define PLL_FN_HZ   20.0f   /* observer natural frequency */
+#define PLL_ZETA    0.8f    /* damping ratio */
+static float   g_pll_theta   = 0.0f;   /* tracked angle, rad [0,2pi) */
+static float   g_pll_omega   = 0.0f;   /* tracked velocity, rad/s */
+static bool    g_pll_init    = false;
+static int64_t g_pll_last_us = 0;
 
 /* ------------------------------------------------------------------ */
 
@@ -186,18 +211,46 @@ void sensor_update(sensor_t *sensor)
 
 	double deg = sensor_value_to_double(&val);
 	g_cached_angle_rad = (float)(deg * (M_PI / 180.0));
+
+	/* Run the tracking observer on the fresh raw sample. */
+	const float two_pi = 2.0f * (float)M_PI;
+	float theta_raw = g_cached_angle_rad;
+
+	float dt = g_pll_init ? (float)(now_us - g_pll_last_us) * 1e-6f : 0.001f;
+	if (dt <= 0.0f)   dt = 0.001f;
+	if (dt > 0.02f)   dt = 0.02f;   /* clamp after long gaps (init/calibration) */
+	g_pll_last_us = now_us;
+
+	if (!g_pll_init) {
+		g_pll_theta = theta_raw;
+		g_pll_omega = 0.0f;
+		g_pll_init  = true;
+	} else {
+		const float wn = two_pi * PLL_FN_HZ;
+		const float kp = 2.0f * PLL_ZETA * wn;
+		const float ki = wn * wn;
+		float e = theta_raw - g_pll_theta;
+		while (e >  (float)M_PI) e -= two_pi;
+		while (e < -(float)M_PI) e += two_pi;
+		g_pll_omega += ki * e * dt;
+		g_pll_theta += (g_pll_omega + kp * e) * dt;
+		while (g_pll_theta >= two_pi) g_pll_theta -= two_pi;
+		while (g_pll_theta < 0.0f)    g_pll_theta += two_pi;
+	}
 }
 
 float sensor_get_angle(sensor_t *sensor)
 {
 	ARG_UNUSED(sensor);
-	return g_cached_angle_rad;
+	/* Smoothed (observer) angle so commutation isn't driven by raw CORDIC noise. */
+	return g_pll_theta;
 }
 
 float sensor_get_velocity(sensor_t *sensor)
 {
 	ARG_UNUSED(sensor);
-	return 0.0f;
+	/* Clean observer velocity (rad/s) for haptic damping. */
+	return g_pll_omega;
 }
 
 bool sensor_needs_search(sensor_t *sensor)
