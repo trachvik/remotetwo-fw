@@ -34,7 +34,14 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define GESTURE_RELEASE_ZONE   0.09f /* slightly tighter release zone to reset gesture */
 #define HAPTIC_ZERO_ZONE_RAD   (0.5f * (_PI / 180.0f))  /* hard zero below 0.5 deg, no PWM output */
 #define HAPTIC_BLEND_ZONE_RAD  (2.5f * (_PI / 180.0f))  /* smooth force ramp from 0 to full between 0.5 and 2.5 deg */
-#define HAPTIC_DETENT_AMP_V 1.0f    /* peak spring voltage in detent mode */
+#define HAPTIC_DETENT_AMP_V 0.65f   /* peak spring voltage in detent mode.
+                                     * Lowered 1.0->0.65 as a voltage-mode quiet test: the detent
+                                     * spring stiffness keff = AMP*2pi/step_size sets the torsional
+                                     * resonance fn = (1/2pi)sqrt(keff/J) that "sings" in the audible
+                                     * 50-500 Hz band. The 20 Hz-bandwidth velocity damping cannot
+                                     * reach that band, so the only voltage-mode lever is to lower the
+                                     * excitation/stiffness itself. Raise back toward 1.0 if detents
+                                     * feel too weak; the trade-off is louder singing. */
 #define DETENT_KV           0.12f   /* V*s/rad velocity damping in detent mode. Moderate: enough to
                                      * stop the spring ringing, low enough that encoder velocity
                                      * noise does not become audible torque ripple. */
