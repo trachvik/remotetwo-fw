@@ -9,6 +9,7 @@ if(CONFIG_APP_DISP_TEST)
         src/haptic.c
         src/drivers/bldc_driver_3pwm.c
         src/drivers/bldc_motor.c
+        src/drivers/current_sense.c
         src/drivers/tmag5170_sensor.c
     )
 elseif(CONFIG_APP_DRV_TEST)
@@ -26,6 +27,7 @@ else()
         src/drivers/tmag5170_sensor.c
         src/drivers/bldc_driver_3pwm.c
         src/drivers/bldc_motor.c
+        src/drivers/current_sense.c
     )
 endif()
 

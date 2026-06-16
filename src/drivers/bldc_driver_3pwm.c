@@ -41,15 +41,46 @@ static void fault_isr(const struct device *dev, struct gpio_callback *cb,
 /* ------------------------------------------------------------------ */
 /* Internal helper: write duty cycles directly to PWM hardware        */
 /* ------------------------------------------------------------------ */
+/*
+ * PWM_LOWSIDE_SYNC: invert the PWM polarity (and compensate the pulse width)
+ * so the DRV8311H low-side conduction window sits at the START of each PWM
+ * period, immediately after PWMPERIODEND. That is exactly when the SAADC is
+ * hardware-triggered (see current_sense.c), so the synced sample lands while
+ * the low-side shunt carries the phase current.
+ *
+ * Inverting + writing pulse = (period - pa) keeps the HIGH-side conduction
+ * time identical to the non-inverted case (= dc_a * period), so the motor
+ * phase voltage is unchanged - only the position of the low-side window moves.
+ *
+ * NOTE: temporarily disabled (set to 0) while diagnosing the SAADC sampling -
+ * inverted polarity makes a 0% command become a 100% pulse, which the Zephyr
+ * nrfx PWM driver treats as a constant level and stops the peripheral, killing
+ * the PWMPERIODEND event. Running NORMAL polarity first to capture clean
+ * per-phase raw-voltage diagnostics.
+ */
+#define PWM_LOWSIDE_SYNC 0
+
 static void write_duty_cycles(uint32_t period_ns, float dc_a, float dc_b, float dc_c)
 {
     uint32_t pa = (uint32_t)(_CONSTRAIN(dc_a, 0.0f, 1.0f) * (float)period_ns);
     uint32_t pb = (uint32_t)(_CONSTRAIN(dc_b, 0.0f, 1.0f) * (float)period_ns);
     uint32_t pc = (uint32_t)(_CONSTRAIN(dc_c, 0.0f, 1.0f) * (float)period_ns);
 
+#if PWM_LOWSIDE_SYNC
+    /* Inverted polarity: active (LOW) pulse = period - pa at the start of the
+     * period -> low-side ON window is [0, period - pa). High-side ON time is
+     * the remainder = pa, preserving the commanded phase voltage. */
+    int r0 = pwm_set(pwm_ina.dev, pwm_ina.channel, period_ns, period_ns - pa,
+                     PWM_POLARITY_INVERTED);
+    int r1 = pwm_set(pwm_inb.dev, pwm_inb.channel, period_ns, period_ns - pb,
+                     PWM_POLARITY_INVERTED);
+    int r2 = pwm_set(pwm_inc.dev, pwm_inc.channel, period_ns, period_ns - pc,
+                     PWM_POLARITY_INVERTED);
+#else
     int r0 = pwm_set_dt(&pwm_ina, period_ns, pa);
     int r1 = pwm_set_dt(&pwm_inb, period_ns, pb);
     int r2 = pwm_set_dt(&pwm_inc, period_ns, pc);
+#endif
 
     if (r0 || r1 || r2) {
         static bool logged_once = false;

@@ -1,5 +1,6 @@
 #include "haptic.h"
 #include "drivers/tmag5170_sensor.h"
+#include "drivers/current_sense.h"
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
@@ -80,6 +81,15 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define MOTOR_PHASE_RESISTANCE 5.6f  /* Ohms */
 #define MOTOR_KV_RATING 320.0f  /* rpm/V */
 #define MOTOR_INDUCTANCE 0.0001f /* H */
+
+/* ---- FOC current (closed-loop torque) control ----
+ * The haptic law above computes a torque command in the voltage domain
+ * (spring_v, damp_v in volts). In current mode that command is reinterpreted as
+ * a current setpoint I = V / R, and the current PID renders it without the
+ * cogging/resonance voltage ripple that makes voltage mode "sing". */
+#define HAPTIC_USE_CURRENT_CONTROL 1
+#define HAPTIC_VOLT_TO_AMP   (1.0f / MOTOR_PHASE_RESISTANCE) /* V-domain torque -> A setpoint */
+#define HAPTIC_CURRENT_LIMIT 0.6f   /* A, hard clamp on the q-current setpoint */
 
 /* Prefer btn_south, keep compatibility with older overlays and board buttons. */
 #if DT_NODE_EXISTS(DT_NODELABEL(btn_south))
@@ -315,7 +325,9 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     /* Set motor to torque control mode (voltage) */
     motor->target = 0.0f;  /* Start with zero torque */
 
-    /* Settle motor at zero torque after calibration */
+    /* Settle motor at zero torque after calibration (still voltage mode -> phases
+     * sit at zero, which is exactly what the current-sense offset calibration
+     * needs). */
     for (int i = 0; i < 100; i++) {
         bldc_motor_loop_foc(motor);
         bldc_motor_move(motor, 0.0f);
@@ -323,6 +335,54 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     }
 
     k_msleep(500);
+
+#if HAPTIC_USE_CURRENT_CONTROL
+    /* ---- FOC current control bring-up ----
+     * We ALWAYS switch the torque controller to FOC_CURRENT. If the SAADC fails
+     * to come up we deliberately do NOT silently revert to voltage control:
+     * the FOC loop will instead emit a loud per-second warning so a broken
+     * current loop can never masquerade as working (the exact failure mode of
+     * SimpleFOC's automatic fallback). */
+    LOG_INF("5. Initializing FOC current sense (DRV8311H CSA via SAADC)...");
+    int cs_err = current_sense_init();
+    bool cs_ok = (cs_err == 0) && current_sense_is_ready();
+
+    if (cs_ok) {
+        /* Phases are at zero here -> measure the amplifier mid-rail offsets. */
+        current_sense_calibrate_offsets();
+    } else {
+        LOG_ERR("   [FAIL] current sense init err=%d -> torque will run as LOUD voltage fallback", cs_err);
+    }
+
+    /* Current PID outputs a voltage, so clamp it to the supply voltage limit. */
+    motor->pid_current_q.limit = motor->voltage_limit;
+    motor->pid_current_d.limit = motor->voltage_limit;
+    motor->current_limit = HAPTIC_CURRENT_LIMIT;
+    motor->torque_controller = FOC_CURRENT;
+
+    if (cs_ok) {
+        /* Find current-sense polarity vs the driver so the q-current PID does
+         * not run away. */
+        bldc_motor_align_current_sense(motor);
+
+        float oa = 0.0f, ob = 0.0f, oc = 0.0f;
+        current_sense_get_offsets(&oa, &ob, &oc);
+        LOG_INF("   [OK] FOC_CURRENT active | offsets SOA=%.3f SOB=%.3f SOC=%.3f V | gain_sign=%+.0f",
+                (double)oa, (double)ob, (double)oc, (double)current_sense_get_gain_sign());
+        LOG_INF("   Proof of life will print 'FOC_CURRENT RUNNING ...' ~1x/s from the control loop.");
+    } else {
+        LOG_WRN("   [WARN] torque_controller=FOC_CURRENT but SAADC NOT ready -> expect loud VOLTAGE-fallback warnings");
+    }
+
+    /* Re-settle at zero current after the alignment move. */
+    motor->target = 0.0f;
+    for (int i = 0; i < 100; i++) {
+        bldc_motor_loop_foc(motor);
+        bldc_motor_move(motor, 0.0f);
+        k_msleep(1);
+    }
+    k_msleep(200);
+#endif
 
     /* Store start angle for relative position calculation */
     sensor_update(encoder);
@@ -649,6 +709,16 @@ void haptic_loop(bldc_motor_t *motor)
 
     /* move() sets target, loop_foc() applies it using fresh electrical angle.
      * Order MUST be: move -> loop_foc (SimpleFOC contract). */
-    bldc_motor_move(motor, target_voltage);
+    float target_torque = target_voltage;
+#if HAPTIC_USE_CURRENT_CONTROL
+    if (motor->torque_controller == FOC_CURRENT) {
+        /* Reinterpret the voltage-domain spring/damp command as a current
+         * setpoint (I = V / R) and clamp it for safety. */
+        target_torque = target_voltage * HAPTIC_VOLT_TO_AMP;
+        if (target_torque >  HAPTIC_CURRENT_LIMIT) target_torque =  HAPTIC_CURRENT_LIMIT;
+        if (target_torque < -HAPTIC_CURRENT_LIMIT) target_torque = -HAPTIC_CURRENT_LIMIT;
+    }
+#endif
+    bldc_motor_move(motor, target_torque);
     bldc_motor_loop_foc(motor);
 }

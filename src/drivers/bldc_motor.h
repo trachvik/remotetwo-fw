@@ -274,6 +274,19 @@ void bldc_motor_move(bldc_motor_t *motor, float target);
 void bldc_motor_set_phase_voltage(bldc_motor_t *motor, float uq, float ud, float angle_el);
 
 /**
+ * Align the current-sense polarity to the driver.
+ *
+ * Drives a known voltage on the alpha (phase-A) axis and checks the sign of the
+ * resulting measured phase-A current; if it reads negative, the global current
+ * gain sign is flipped so a positive q-current command always produces a
+ * positive measured q-current (otherwise the current PID would run away).
+ * Mirrors SimpleFOC CurrentSense::driverAlign(). Returns 1 on success.
+ *
+ * @param motor Pointer to motor structure (must be enabled, current sense ready)
+ */
+int bldc_motor_align_current_sense(bldc_motor_t *motor);
+
+/**
  * Calculate shaft angle
  * 
  * @param motor Pointer to motor structure
