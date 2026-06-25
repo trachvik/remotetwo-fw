@@ -22,10 +22,10 @@ LOG_MODULE_REGISTER(bldc_motor, LOG_LEVEL_DBG);
 #define DEF_P_ANGLE_P 20.0f
 #define DEF_VEL_LIM 20.0f
 #define DEF_VEL_FILTER_TF 0.005f
-#define DEF_PID_CURR_P 3.0f
-#define DEF_PID_CURR_I 300.0f
+#define DEF_PID_CURR_P 0.5f       /* Reduced: was 3.0f (too aggressive) */
+#define DEF_PID_CURR_I 5.0f       /* Drastically reduced: was 300.0f (caused oscillation) */
 #define DEF_PID_CURR_D 0.0f
-#define DEF_PID_CURR_RAMP 1000.0f
+#define DEF_PID_CURR_RAMP 10.0f   /* Reduced: was 1000.0f (limited voltage slew rate to ~3V per cycle max) */
 #define DEF_CURR_FILTER_TF 0.005f
 #define DEF_MOTION_DOWNSAMPLE 0
 #define DEF_MON_DOWNSAMPLE 100
@@ -673,6 +673,19 @@ void bldc_motor_loop_foc(bldc_motor_t *motor)
             /* --- Real FOC current control (SimpleFOC loopFOC foc_current case) --- */
             float id_meas = 0.0f, iq_meas = 0.0f;
             current_sense_get_foc_currents(motor->electrical_angle, &id_meas, &iq_meas);
+
+            /* SerialPlot stream: the three measured phase currents [mA], one
+             * line per control cycle, format "DATA:ia,ib,ic". These are the
+             * offset-corrected IOUTx the current loop just consumed
+             * (IOUTx = (SOx - offset)/GCSA, then the CSA correction matrix). */
+            {
+                float i_a = 0.0f, i_b = 0.0f, i_c = 0.0f;
+                current_sense_get_last_currents(&i_a, &i_b, &i_c);
+                printk("DATA:%d,%d,%d\n",
+                       (int)(i_a * 1000.0f),
+                       (int)(i_b * 1000.0f),
+                       (int)(i_c * 1000.0f));
+            }
 
             motor->current.q = lowpass_filter_operator(&motor->lpf_current_q, iq_meas);
             motor->current.d = lowpass_filter_operator(&motor->lpf_current_d, id_meas);

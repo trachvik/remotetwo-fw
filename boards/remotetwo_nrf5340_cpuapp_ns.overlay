@@ -185,13 +185,13 @@
 	tmag5170: tmag5170@0 {
 		compatible = "ti,tmag5170";
 		reg = <0>;
-		spi-max-frequency = <8000000>;
+		spi-max-frequency = <10000000>;
 		operating-mode = <2>;
 		magnetic-channels = "XY";
 		angle-measurement = "XY";
 		/* Noise reduction: 32x hardware oversampling => ~sqrt(32) ≈ 5.7x less
 		 * angle noise. Default oversampling=1 (chip reset) gave ~8 deg p-p. */
-		oversampling = <32>;
+		oversampling = <1>;
 		/* Measured in-plane field |Bxy| ≈ 50 mT (magnet at working distance).
 		 * At ±25 mT (range 1) both axes railed at ~25 (fake 315° angle); at
 		 * ±50 mT (range 0) the dominant axis still pegs at ~49.9 mT => still
@@ -204,7 +204,7 @@
 	ssd1309: ssd1309@1 {
 		compatible = "solomon,ssd1309fb";
 		reg = <1>;
-		spi-max-frequency = <8000000>;
+		spi-max-frequency = <10000000>;
 		width = <128>;
 		height = <64>;
 		segment-offset = <0>;

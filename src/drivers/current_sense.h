@@ -41,8 +41,14 @@ bool current_sense_is_ready(void);
  * Returns 0 on success. */
 int current_sense_calibrate_offsets(void);
 
-/* Read the three phase currents [A] (offset removed, gain + sign applied). */
+/* Read the three phase currents [A] (offset removed, gain + sign applied, plus
+ * the DRV8311H CSA cross-channel offset-correction matrix). */
 phase_current_t current_sense_get_phase_currents(void);
+
+/* The corrected phase currents [A] from the most recent conversion, WITHOUT
+ * triggering a new read. Used by the SerialPlot stream so the plotted values
+ * are exactly the currents the FOC loop consumed. */
+void current_sense_get_last_currents(float *ia, float *ib, float *ic);
 
 /* Clarke + Park: produce the FOC d/q currents [A] at the given electrical
  * angle. Mirrors SimpleFOC CurrentSense::getFOCCurrents(). */

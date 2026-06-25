@@ -1,7 +1,7 @@
 # TO DO
 
 - [x] Smooth mode control
-- [ ] Reverse knob polarity
+- [x] Reverse knob polarity
 - [x] Adjustable detend size based on number of steps - done
 
 
@@ -47,3 +47,9 @@ To make this work in smooth mode, I must implement a virtual detent that activat
     - has REG0x30_VBAT_ADC register, so I really dont need external VSYS analog input
 
 - [ ] LED1202QTR - TO DO later
+
+## Cogging and noise reduction
+
+- [ ] calibration phase
+- [ ] make sure tmag oversampling is optimal
+- [ ] make sure tmag spi freq. is 10 MHz
