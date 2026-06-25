@@ -82,12 +82,23 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define MOTOR_KV_RATING 320.0f  /* rpm/V */
 #define MOTOR_INDUCTANCE 0.0001f /* H */
 
-/* ---- FOC current (closed-loop torque) control ----
- * The haptic law above computes a torque command in the voltage domain
- * (spring_v, damp_v in volts). In current mode that command is reinterpreted as
- * a current setpoint I = V / R, and the current PID renders it without the
- * cogging/resonance voltage ripple that makes voltage mode "sing". */
-#define HAPTIC_USE_CURRENT_CONTROL 1
+/* ---- Torque control mode ----
+ * The haptic law below computes a torque command in the voltage domain
+ * (spring_v, damp_v in volts).
+ *
+ * HAPTIC_USE_CURRENT_CONTROL: when 1 the command is reinterpreted as a current
+ *   setpoint I = V / R and rendered by the closed FOC current PID. This was
+ *   measured to corrupt the haptic feel: the current loop turns the detent law
+ *   into a position-holding spring (the loop fights the hand instead of
+ *   producing crisp detents), so it is DISABLED.
+ *
+ * HAPTIC_CURRENT_SENSE_TELEMETRY: keep the SAADC current sensing alive purely
+ *   for measurement / the SerialPlot DATA stream WITHOUT closing the current
+ *   loop. The motor is driven open-loop in VOLTAGE mode (the feel that works),
+ *   while the phase currents are still sampled every cycle and streamed. This
+ *   is the "keep reading the ADCs but fix the haptic" configuration. */
+#define HAPTIC_USE_CURRENT_CONTROL 0
+#define HAPTIC_CURRENT_SENSE_TELEMETRY 1
 #define HAPTIC_VOLT_TO_AMP   (1.0f / MOTOR_PHASE_RESISTANCE) /* V-domain torque -> A setpoint */
 #define HAPTIC_CURRENT_LIMIT 0.6f   /* A, hard clamp on the q-current setpoint */
 
@@ -336,13 +347,12 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
 
     k_msleep(500);
 
-#if HAPTIC_USE_CURRENT_CONTROL
-    /* ---- FOC current control bring-up ----
-     * We ALWAYS switch the torque controller to FOC_CURRENT. If the SAADC fails
-     * to come up we deliberately do NOT silently revert to voltage control:
-     * the FOC loop will instead emit a loud per-second warning so a broken
-     * current loop can never masquerade as working (the exact failure mode of
-     * SimpleFOC's automatic fallback). */
+#if HAPTIC_USE_CURRENT_CONTROL || HAPTIC_CURRENT_SENSE_TELEMETRY
+    /* ---- Current-sense bring-up ----
+     * The SAADC is brought up in BOTH the closed-loop current-control config and
+     * the telemetry-only config. The difference is whether the torque controller
+     * is switched to FOC_CURRENT (closed loop) or left in VOLTAGE (open loop,
+     * correct haptic feel, currents only measured for the DATA stream). */
     LOG_INF("5. Initializing FOC current sense (DRV8311H CSA via SAADC)...");
     int cs_err = current_sense_init();
     bool cs_ok = (cs_err == 0) && current_sense_is_ready();
@@ -351,9 +361,14 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
         /* Phases are at zero here -> measure the amplifier mid-rail offsets. */
         current_sense_calibrate_offsets();
     } else {
-        LOG_ERR("   [FAIL] current sense init err=%d -> torque will run as LOUD voltage fallback", cs_err);
+        LOG_ERR("   [FAIL] current sense init err=%d", cs_err);
     }
 
+#if HAPTIC_USE_CURRENT_CONTROL
+    /* ---- Closed-loop FOC current control ----
+     * If the SAADC fails to come up we deliberately do NOT silently revert to
+     * voltage control: the FOC loop emits a loud per-second warning so a broken
+     * current loop can never masquerade as working. */
     /* Current PID outputs a voltage, so clamp it to the supply voltage limit. */
     motor->pid_current_q.limit = motor->voltage_limit;
     motor->pid_current_d.limit = motor->voltage_limit;
@@ -373,8 +388,24 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     } else {
         LOG_WRN("   [WARN] torque_controller=FOC_CURRENT but SAADC NOT ready -> expect loud VOLTAGE-fallback warnings");
     }
+#else
+    /* ---- Telemetry-only: VOLTAGE torque, currents measured for DATA stream ----
+     * Keep the open-loop voltage drive (the haptic feel that works) and do NOT
+     * close the current loop. The phase currents are still sampled every cycle
+     * in haptic_loop() and streamed as "DATA:ia,ib,ic". */
+    motor->torque_controller = VOLTAGE;
+    if (cs_ok) {
+        float oa = 0.0f, ob = 0.0f, oc = 0.0f;
+        current_sense_get_offsets(&oa, &ob, &oc);
+        LOG_INF("   [OK] current-sense TELEMETRY active (VOLTAGE torque) | offsets SOA=%.3f SOB=%.3f SOC=%.3f V",
+                (double)oa, (double)ob, (double)oc);
+        LOG_INF("   DATA:ia,ib,ic [mA] streamed ~1 kHz from the haptic loop.");
+    } else {
+        LOG_WRN("   [WARN] current sense NOT ready -> DATA stream disabled (haptic still runs in VOLTAGE mode)");
+    }
+#endif
 
-    /* Re-settle at zero current after the alignment move. */
+    /* Re-settle at zero output after bring-up. */
     motor->target = 0.0f;
     for (int i = 0; i < 100; i++) {
         bldc_motor_loop_foc(motor);
@@ -721,4 +752,18 @@ void haptic_loop(bldc_motor_t *motor)
 #endif
     bldc_motor_move(motor, target_torque);
     bldc_motor_loop_foc(motor);
+
+#if HAPTIC_CURRENT_SENSE_TELEMETRY && !HAPTIC_USE_CURRENT_CONTROL
+    /* Voltage-mode torque keeps the correct haptic feel; we still sample the
+     * phase currents purely for the SerialPlot "DATA:ia,ib,ic" [mA] stream.
+     * loop_foc() does NOT read the SAADC in VOLTAGE mode, so trigger a fresh
+     * read here. Phase A is reconstructed as -(Ib+Ic) inside current_sense. */
+    if (current_sense_is_ready()) {
+        phase_current_t pc = current_sense_get_phase_currents();
+        printk("DATA:%d,%d,%d\n",
+               (int)(pc.a * 1000.0f),
+               (int)(pc.b * 1000.0f),
+               (int)(pc.c * 1000.0f));
+    }
+#endif
 }

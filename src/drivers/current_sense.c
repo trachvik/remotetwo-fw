@@ -62,6 +62,14 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  * 0.5 = geometric centre (correct for CENTRE-aligned PWM). See caveat above. */
 #define ISENSE_SAMPLE_FRACTION 0.5f
 
+/* Phase-A reconstruction. The SOA shunt/CSA path (P0.27 = AIN6) on this board
+ * is unreliable (reads ~0 regardless of real phase current - a likely HW fault
+ * such as a cold solder joint). SOB and SOC read cleanly, so when this is set
+ * phase A is derived exactly from Kirchhoff's law Ia = -(Ib + Ic) instead of
+ * the SOA conversion. Set to 0 once the SOA hardware is repaired to use the
+ * directly-measured three-shunt reading again. */
+#define ISENSE_RECONSTRUCT_PHASE_A 1
+
 /* TIMER instance used as the PWM-locked sample timer. TIMER2 is not claimed by
  * the Zephyr system clock (RTC1) nor by any driver on this target. */
 #define ISENSE_TIMER          NRF_TIMER2
@@ -393,12 +401,27 @@ phase_current_t current_sense_get_phase_currents(void)
     float ib_s = (v[1] - g_offset_v[1]) * CSA_AMPS_PER_V * g_gain_sign;
     float ic_s = (v[2] - g_offset_v[2]) * CSA_AMPS_PER_V * g_gain_sign;
 
+#if ISENSE_RECONSTRUCT_PHASE_A
+    /* The SOA channel (P0.27/AIN6) is hardware-unreliable on this board (reads
+     * ~0 regardless of real current - likely a cold joint / damaged shunt or
+     * CSA). SOB and SOC are trustworthy, so phase A is recovered exactly from
+     * Kirchhoff's current law Ia + Ib + Ic = 0 => Ia = -(Ib + Ic).
+     *
+     * Only the good SOB/SOC shunts feed the offset-correction matrix, and the
+     * matrix's tiny A-cross-terms are DROPPED so a bad SOA reading can never
+     * leak into B/C. The measured SOA value (ia_s) is therefore unused here. */
+    (void)ia_s;
+    c.b = 1.000665f * ib_s - 0.019126f * ic_s;
+    c.c = 0.001595f * ib_s + 0.998166f * ic_s;
+    c.a = -(c.b + c.c);
+#else
     /* DRV8311H CSA cross-channel offset correction (datasheet 8.3.10.2). The
      * sense-vs-output FET ground difference induces a small current-dependent
      * offset that distorts multi-shunt FOC; this matrix corrects it. */
     c.a = 1.001152f * ia_s - 0.003375f * ib_s - 0.003103f * ic_s;
     c.b = 0.002369f * ia_s + 1.000665f * ib_s - 0.019126f * ic_s;
     c.c = 0.001234f * ia_s + 0.001595f * ib_s + 0.998166f * ic_s;
+#endif
 
     unsigned int key = irq_lock();
     g_last_i[0] = c.a;
