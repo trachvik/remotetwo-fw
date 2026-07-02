@@ -53,22 +53,38 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  * ISENSE_SAMPLE_FRACTION below is the single knob for this.
  *
  * Channel / pin map (SAADC scan order = channel_index ascending):
- *   index 0 -> AIN6 = P0.27 = SOA
- *   index 1 -> AIN5 = P0.26 = SOB
- *   index 2 -> AIN4 = P0.25 = SOC
+ *   index 0..3 -> AIN6            = warm-up conversions (discarded)
+ *   index 4    -> AIN6 = P0.27    = SOA
+ *   index 5    -> AIN5 = P0.26    = SOB
+ *   index 6    -> AIN4 = P0.25    = SOC
  */
 
-/* Fraction of the PWM period at which TIMER2.COMPARE[0] fires the SAADC sample.
- * 0.5 = geometric centre (correct for CENTRE-aligned PWM). See caveat above. */
-#define ISENSE_SAMPLE_FRACTION 0.5f
+/* Fraction of the PWM period at which TIMER2.COMPARE[0] STARTS the scan.
+ *
+ * The channel that rails is set by its POSITION in the scan, not the PWM phase:
+ * the SAADC front-end needs ~3-4 back-to-back conversions to settle after the
+ * ~40 us inter-scan idle gap, so the FIRST real conversions read ~VDD. The fix
+ * is the NUM_WARMUP_CH sacrificial conversions (see m_channels) that settle the
+ * front-end. For that to cost nothing, the scan is started EARLY in the period
+ * (~0.1) so the warm-up conversions run during the high-side window (where
+ * low-side sensing is invalid anyway) and the three real channels (conversions
+ * 5/6/7, ~5 us apart) land inside the low-side window [0.5*period, period] with
+ * a fully-settled front-end.
+ *
+ * For a 25 kHz / 640-tick period and ~5 us/conversion: start tick ~64, real
+ * channels at ~tick 384/464/544 = ~24/29/34 us = mid low-side window. Tune: if
+ * SOA still rails raise NUM_WARMUP_CH; if SOC rails (real channels pushed past
+ * the period end) lower this fraction or NUM_WARMUP_CH. */
+#define ISENSE_SAMPLE_FRACTION 0.1f
 
-/* Phase-A reconstruction. The SOA shunt/CSA path (P0.27 = AIN6) on this board
- * is unreliable (reads ~0 regardless of real phase current - a likely HW fault
- * such as a cold solder joint). SOB and SOC read cleanly, so when this is set
- * phase A is derived exactly from Kirchhoff's law Ia = -(Ib + Ic) instead of
- * the SOA conversion. Set to 0 once the SOA hardware is repaired to use the
- * directly-measured three-shunt reading again. */
-#define ISENSE_RECONSTRUCT_PHASE_A 1
+/* Phase-A reconstruction. Previously assumed SOA was a permanent HW fault (cold
+ * joint). That was DISPROVEN: the saturation is a sampling-instant artifact and
+ * walks between SOA and SOB depending on rotor rest position (see
+ * ISENSE_SAMPLE_FRACTION above), so no single channel is dead. With the sample
+ * point moved into the quiet low-side window all three shunts read correctly,
+ * so reconstruction is OFF and the directly-measured three-shunt currents are
+ * used. (Re-enable only as a fallback if one shunt is later proven dead.) */
+#define ISENSE_RECONSTRUCT_PHASE_A 0
 
 /* TIMER instance used as the PWM-locked sample timer. TIMER2 is not claimed by
  * the Zephyr system clock (RTC1) nor by any driver on this target. */
@@ -85,9 +101,21 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
 #define CSA_GAIN_V_PER_A 2.0f
 #define CSA_AMPS_PER_V   (1.0f / CSA_GAIN_V_PER_A)
 
-#define NUM_CH        3
+#define NUM_CH        3                       /* reported phase channels SOA,SOB,SOC */
+/* Warm-up conversions prepended to every scan. The SAADC analog front-end needs
+ * ~3-4 back-to-back conversions (~15-20 us) to settle after the ~40 us idle gap
+ * between PWM-period-triggered scans; until then the early conversions read ~VDD
+ * (railed). Measured: with the real channels at scan positions 2/3/4 the 2nd
+ * (SOA) always railed, the 3rd (SOB) sometimes, the 4th (SOC) never. These
+ * sacrificial conversions carry no usable data - they exist only to keep the
+ * front-end converting so the real channels that follow are fully settled. They
+ * are scheduled (via ISENSE_SAMPLE_FRACTION) to run during the high-side window
+ * at the START of the period (where low-side sensing is invalid anyway), so they
+ * cost no time inside the low-side window. */
+#define NUM_WARMUP_CH 4
+#define NUM_SCAN_CH   (NUM_WARMUP_CH + NUM_CH) /* warm-up + SOA,SOB,SOC */
 #define SCANS_PER_BUF 8
-#define BUF_LEN       (NUM_CH * SCANS_PER_BUF)
+#define BUF_LEN       (NUM_SCAN_CH * SCANS_PER_BUF)
 
 /* Internal 0.6 V reference with gain 1/6 -> full-scale 3.6 V single-ended,
  * which spans the 0..3.3 V CSA output (biased near VREF/2). 12-bit. */
@@ -105,6 +133,13 @@ static volatile uint8_t  m_next_buf = 0;
 static volatile int16_t  g_raw[NUM_CH] = {0, 0, 0};
 static volatile uint32_t g_scan_count = 0;
 
+/* Optional diagnostic capture for a full scan. Disabled by default to keep the
+ * bring-up path stable and avoid console traffic during init/calibration. */
+#define CURRENT_SENSE_DEBUG_SCANPROFILE 0
+#if CURRENT_SENSE_DEBUG_SCANPROFILE
+static volatile int16_t  g_raw_full[NUM_SCAN_CH] = {0};
+#endif
+
 static bool  g_ready = false;
 static float g_offset_v[NUM_CH] = {0.0f, 0.0f, 0.0f};
 static float g_gain_sign = 1.0f;
@@ -120,10 +155,19 @@ static nrfx_gppi_handle_t h_sample;   /* TIMER COMPARE0 -> SAADC SAMPLE */
 static nrfx_gppi_handle_t h_start;    /* SAADC END     -> SAADC START  */
 static volatile bool      g_armed = false;
 
-static nrfx_saadc_channel_t m_channels[NUM_CH] = {
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 0), /* SOA */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN5, 1), /* SOB */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN4, 2), /* SOC */
+static nrfx_saadc_channel_t m_channels[NUM_SCAN_CH] = {
+    /* Warm-up conversions (channel indices 0..NUM_WARMUP_CH-1, sampled FIRST as
+     * scan order = channel-index ascending). They re-use AIN6 and are NEVER read
+     * out; their only job is to keep the SAADC front-end converting through the
+     * high-side window so it is fully settled by the time the three real
+     * channels are reached in the low-side window. */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 0), /* warm-up (discarded) */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 1), /* warm-up (discarded) */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 2), /* warm-up (discarded) */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 3), /* warm-up (discarded) */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 4), /* SOA */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN5, 5), /* SOB */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN4, 6), /* SOC */
 };
 
 /* ------------------------------------------------------------------ */
@@ -152,10 +196,18 @@ static void saadc_handler(nrfx_saadc_evt_t const *p_event)
     case NRFX_SAADC_EVT_DONE: {
         nrf_saadc_value_t *b = p_event->data.done.p_buffer;
         uint16_t n = p_event->data.done.size;
-        if (n >= NUM_CH) {
+        if (n >= NUM_SCAN_CH) {
+            /* Last full scan = [warm-up x NUM_WARMUP_CH, SOA, SOB, SOC]; the
+             * warm-up slots are discarded and the three real channels are the
+             * last 3 of the scan. */
             g_raw[0] = b[n - 3];
             g_raw[1] = b[n - 2];
             g_raw[2] = b[n - 1];
+#if CURRENT_SENSE_DEBUG_SCANPROFILE
+            for (int j = 0; j < NUM_SCAN_CH; j++) {
+                g_raw_full[j] = b[n - NUM_SCAN_CH + j];
+            }
+#endif
             g_scan_count++;
         }
         break;
@@ -250,13 +302,13 @@ int current_sense_init(void)
     irq_enable(NRFX_IRQ_NUMBER_GET(NRF_SAADC));
 
     /* Override macro defaults: gain 1/6 (full scale 3.6 V) and a short 3 us
-     * acquisition so all three channels fit inside the low-side window. */
-    for (int i = 0; i < NUM_CH; i++) {
+     * acquisition so all four scan channels fit inside the low-side window. */
+    for (int i = 0; i < NUM_SCAN_CH; i++) {
         m_channels[i].channel_config.gain     = NRF_SAADC_GAIN1_6;
         m_channels[i].channel_config.acq_time = NRF_SAADC_ACQTIME_3US;
     }
 
-    ret = nrfx_saadc_channels_config(m_channels, NUM_CH);
+    ret = nrfx_saadc_channels_config(m_channels, NUM_SCAN_CH);
     if (ret != 0) {
         LOG_ERR("nrfx_saadc_channels_config failed (%d)", ret);
         return ret;
@@ -345,6 +397,7 @@ int current_sense_init(void)
     isense_read_volts(v);
     LOG_INF("SAADC HW-timed ready: probe SOA=%.3f SOB=%.3f SOC=%.3f V (scans=%u)",
             (double)v[0], (double)v[1], (double)v[2], g_scan_count);
+
     return 0;
 }
 
