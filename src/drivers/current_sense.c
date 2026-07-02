@@ -43,38 +43,35 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  * at its geometric centre. For 50 %-ish duty the geometric centre is right on
  * the high-side switching edge = worst-case switching noise.
  *
- * Two correct options:
- *   (a) Switch the motor PWM to CENTRE-ALIGNED (up-and-down) mode - then the
- *       period centre genuinely is the middle of the common low-side window and
- *       ISENSE_SAMPLE_FRACTION = 0.5 is ideal. (Requires driving NRF_PWM0 via
- *       nrfx_pwm in NRF_PWM_MODE_UP_AND_DOWN, bypassing the Zephyr PWM driver.)
- *   (b) Keep edge-aligned and move the sample point toward the END of the
- *       period (ISENSE_SAMPLE_FRACTION ~ 0.92).
- * ISENSE_SAMPLE_FRACTION below is the single knob for this.
+ * Center-aligned (UP_AND_DOWN) PWM mode eliminates the simultaneous switching
+ * transient at t=0 that plagued edge-aligned mode. In center-aligned at 25 kHz
+ * (COUNTERTOP=320), each phase switches individually across the upswing and
+ * downswing. The t=0 boundary (counter bottom) has NO simultaneous switching,
+ * so the CSA outputs are quiet from t=0 to ~8 us. The SAADC starts a 3-channel
+ * scan at ISENSE_SAMPLE_FRACTION=0.1 (t~4 us), landing all three conversions
+ * well inside the quiet window (SOA ~4 us, SOB ~9 us, SOC ~14 us) with no
+ * warm-up channels needed.
  *
  * Channel / pin map (SAADC scan order = channel_index ascending):
- *   index 0..3 -> AIN6            = warm-up conversions (discarded)
- *   index 4    -> AIN6 = P0.27    = SOA
- *   index 5    -> AIN5 = P0.26    = SOB
- *   index 6    -> AIN4 = P0.25    = SOC
+ *   index 0    -> AIN6 = P0.27    = SOA
+ *   index 1    -> AIN5 = P0.26    = SOB
+ *   index 2    -> AIN4 = P0.25    = SOC
  */
 
-/* Fraction of the PWM period at which TIMER2.COMPARE[0] STARTS the scan.
+/* Fraction of the PWM period at which TIMER2.COMPARE[0] starts the 3-channel
+ * SAADC scan.
  *
- * The channel that rails is set by its POSITION in the scan, not the PWM phase:
- * the SAADC front-end needs ~3-4 back-to-back conversions to settle after the
- * ~40 us inter-scan idle gap, so the FIRST real conversions read ~VDD. The fix
- * is the NUM_WARMUP_CH sacrificial conversions (see m_channels) that settle the
- * front-end. For that to cost nothing, the scan is started EARLY in the period
- * (~0.1) so the warm-up conversions run during the high-side window (where
- * low-side sensing is invalid anyway) and the three real channels (conversions
- * 5/6/7, ~5 us apart) land inside the low-side window [0.5*period, period] with
- * a fully-settled front-end.
+ * With center-aligned (UP_AND_DOWN) PWM at 25 kHz / COUNTERTOP=320 the t=0
+ * boundary (counter bottom) has NO simultaneous-phase switching. The quiet
+ * low-side window starts at t=0 and ends when the FIRST phase's high-side
+ * turns on (typically ~8 us at moderate duty). Sampling at 0.1 (t~4 us) puts
+ * all three 5 us conversions (SOA ~4 us, SOB ~9 us, SOC ~14 us) in the quiet
+ * zone with comfortable margin.
  *
- * For a 25 kHz / 640-tick period and ~5 us/conversion: start tick ~64, real
- * channels at ~tick 384/464/544 = ~24/29/34 us = mid low-side window. Tune: if
- * SOA still rails raise NUM_WARMUP_CH; if SOC rails (real channels pushed past
- * the period end) lower this fraction or NUM_WARMUP_CH. */
+ * Tune: if SOC still reads wrong, lower this fraction slightly to shift
+ * conversions earlier. If none read correctly, the quiet window may be shorter
+ * than expected at this duty cycle; consider raising the fraction toward the
+ * end of the period (the symmetrical quiet window near t=40 us). */
 #define ISENSE_SAMPLE_FRACTION 0.1f
 
 /* Phase-A reconstruction. Previously assumed SOA was a permanent HW fault (cold
@@ -102,18 +99,9 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
 #define CSA_AMPS_PER_V   (1.0f / CSA_GAIN_V_PER_A)
 
 #define NUM_CH        3                       /* reported phase channels SOA,SOB,SOC */
-/* Warm-up conversions prepended to every scan. The SAADC analog front-end needs
- * ~3-4 back-to-back conversions (~15-20 us) to settle after the ~40 us idle gap
- * between PWM-period-triggered scans; until then the early conversions read ~VDD
- * (railed). Measured: with the real channels at scan positions 2/3/4 the 2nd
- * (SOA) always railed, the 3rd (SOB) sometimes, the 4th (SOC) never. These
- * sacrificial conversions carry no usable data - they exist only to keep the
- * front-end converting so the real channels that follow are fully settled. They
- * are scheduled (via ISENSE_SAMPLE_FRACTION) to run during the high-side window
- * at the START of the period (where low-side sensing is invalid anyway), so they
- * cost no time inside the low-side window. */
-#define NUM_WARMUP_CH 4
-#define NUM_SCAN_CH   (NUM_WARMUP_CH + NUM_CH) /* warm-up + SOA,SOB,SOC */
+/* No warm-up channels needed with center-aligned PWM: the quiet window starts
+ * at t=0 and all three real channels land in it before any switching event. */
+#define NUM_SCAN_CH   NUM_CH                  /* SOA, SOB, SOC only */
 #define SCANS_PER_BUF 8
 #define BUF_LEN       (NUM_SCAN_CH * SCANS_PER_BUF)
 
@@ -152,22 +140,18 @@ static float g_last_i[NUM_CH] = {0.0f, 0.0f, 0.0f};
 /* GPPI (DPPI on the nRF5340) connection handles. */
 static nrfx_gppi_handle_t h_clear;    /* PWMPERIODEND  -> TIMER CLEAR  */
 static nrfx_gppi_handle_t h_sample;   /* TIMER COMPARE0 -> SAADC SAMPLE */
-static nrfx_gppi_handle_t h_start;    /* SAADC END     -> SAADC START  */
+/* h_start removed: start_on_end=true lets nrfx handle START in software
+ * after each END, ensuring EasyDMA buffer is programmed before START fires. */
 static volatile bool      g_armed = false;
+static volatile uint32_t  g_buf_req_count = 0;
 
 static nrfx_saadc_channel_t m_channels[NUM_SCAN_CH] = {
-    /* Warm-up conversions (channel indices 0..NUM_WARMUP_CH-1, sampled FIRST as
-     * scan order = channel-index ascending). They re-use AIN6 and are NEVER read
-     * out; their only job is to keep the SAADC front-end converting through the
-     * high-side window so it is fully settled by the time the three real
-     * channels are reached in the low-side window. */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 0), /* warm-up (discarded) */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 1), /* warm-up (discarded) */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 2), /* warm-up (discarded) */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 3), /* warm-up (discarded) */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 4), /* SOA */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN5, 5), /* SOB */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN4, 6), /* SOC */
+    /* Scan order = channel-index ascending. Center-aligned PWM keeps the CSA
+     * outputs quiet from t=0 to ~8 us; these three conversions at ~4/9/14 us
+     * all land in that quiet window. */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 0), /* SOA – P0.27 */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN5, 1), /* SOB – P0.26 */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN4, 2), /* SOC – P0.25 */
 };
 
 /* ------------------------------------------------------------------ */
@@ -189,6 +173,7 @@ static void saadc_handler(nrfx_saadc_evt_t const *p_event)
         break;
 
     case NRFX_SAADC_EVT_BUF_REQ:
+        g_buf_req_count++;
         m_next_buf ^= 1;
         (void)nrfx_saadc_buffer_set(m_buf[m_next_buf], BUF_LEN);
         break;
@@ -197,9 +182,7 @@ static void saadc_handler(nrfx_saadc_evt_t const *p_event)
         nrf_saadc_value_t *b = p_event->data.done.p_buffer;
         uint16_t n = p_event->data.done.size;
         if (n >= NUM_SCAN_CH) {
-            /* Last full scan = [warm-up x NUM_WARMUP_CH, SOA, SOB, SOC]; the
-             * warm-up slots are discarded and the three real channels are the
-             * last 3 of the scan. */
+            /* Last full scan = [SOA, SOB, SOC]. */
             g_raw[0] = b[n - 3];
             g_raw[1] = b[n - 2];
             g_raw[2] = b[n - 1];
@@ -317,8 +300,11 @@ int current_sense_init(void)
     uint32_t ch_mask = nrfx_saadc_channels_configured_get();
 
     nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
-    /* internal_timer_cc = 0 and start_on_end = false: we drive both SAMPLE
-     * (TIMER2 COMPARE0 via DPPI) and START (SAADC END via DPPI) from hardware. */
+    /* start_on_end=true: nrfx issues the hardware START in its END IRQ handler
+     * after programming EasyDMA with the next buffer.  The DPPI h_start
+     * (SAADC.END -> SAADC.START) is therefore not needed and has been removed.
+     * SAMPLE is still driven by TIMER2 COMPARE0 via DPPI (h_sample). */
+    adv.start_on_end = true;
 
     ret = nrfx_saadc_advanced_mode_set(ch_mask, NRF_SAADC_RESOLUTION_12BIT,
                                        &adv, saadc_handler);
@@ -357,15 +343,44 @@ int current_sense_init(void)
         return ret;
     }
 
-    /* DPPI ch C: SAADC END -> SAADC START (auto re-arm EasyDMA next buffer). */
-    uint32_t saadc_end   = nrf_saadc_event_address_get(NRF_SAADC, NRF_SAADC_EVENT_END);
-    uint32_t saadc_start = nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_START);
-    ret = nrfx_gppi_conn_alloc(saadc_end, saadc_start, &h_start);
-    if (ret != 0) {
-        LOG_ERR("GPPI start conn alloc failed (%d)", ret);
-        return ret;
+    /* h_start DPPI connection removed; start_on_end=true handles re-arming. */
+
+    /* ---- DPPI diagnostic dump ---- */
+    {
+        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND) + 0x80U));
+        uint32_t sub_tmr  = *((volatile uint32_t *)(nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR) + 0x80U));
+        uint32_t pub_tmr  = *((volatile uint32_t *)(nrf_timer_event_address_get(ISENSE_TIMER, NRF_TIMER_EVENT_COMPARE0) + 0x80U));
+        uint32_t sub_saad = *((volatile uint32_t *)(nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE) + 0x80U));
+        LOG_INF("DPPI alloc: h_clear=%d h_sample=%d CHEN=0x%08x",
+                (int)h_clear, (int)h_sample, NRF_DPPIC->CHEN);
+        LOG_INF("DPPI regs: PUB_PWMEND=0x%08x SUB_TMRCLEAR=0x%08x",
+                pub_pwm, sub_tmr);
+        LOG_INF("DPPI regs: PUB_TMRCMP0=0x%08x SUB_SAADCSMP=0x%08x",
+                pub_tmr, sub_saad);
+        /* Verify TIMER2 is being cleared by PWMPERIODEND via h_clear.
+         * Two captures 100 us apart: if h_clear works both reads are <640 (one
+         * PWM period); if h_clear is broken the counter grows ~1600 per 100 us. */
+        nrf_timer_task_trigger(ISENSE_TIMER, NRF_TIMER_TASK_CAPTURE2);
+        uint32_t tc0 = nrf_timer_cc_get(ISENSE_TIMER, NRF_TIMER_CC_CHANNEL2);
+        k_busy_wait(100U);
+        nrf_timer_task_trigger(ISENSE_TIMER, NRF_TIMER_TASK_CAPTURE2);
+        uint32_t tc1 = nrf_timer_cc_get(ISENSE_TIMER, NRF_TIMER_CC_CHANNEL2);
+        LOG_INF("TIMER2 cnt: t0=%u t1=%u diff=%d (h_clear OK if diff<640)",
+                tc0, tc1, (int)(tc1 - tc0));
+
+        /* Check if PWMPERIODEND actually fires. Clear the latched event,
+         * wait 3 PWM periods (3*40µs=120µs), then read back. A non-zero
+         * value means the PWM is running and the event DOES fire; if it
+         * stays 0 the PWM is stalled and h_clear can never work. */
+        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
+        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
+        k_busy_wait(150U);
+        uint32_t pwm_evt_fired = *((volatile uint32_t *)pwm_evt_addr);
+        LOG_INF("PWMPERIODEND: addr=0x%08x fired=%u (1=PWM running, 0=stalled)",
+                pwm_evt_addr, pwm_evt_fired);
+        LOG_INF("Periph addrs: NRF_PWM0=%p NRF_TIMER2=%p NRF_DPPIC=%p",
+                (void *)NRF_PWM0, (void *)ISENSE_TIMER, (void *)NRF_DPPIC);
     }
-    nrfx_gppi_conn_enable(h_start);
 
     /* Internal offset calibration, then arm. */
     ret = nrfx_saadc_offset_calibrate(saadc_handler);
@@ -417,6 +432,20 @@ int current_sense_calibrate_offsets(void)
     uint32_t start_scans = g_scan_count;
 
     for (int n = 0; n < rounds; n++) {
+        /* SW fallback: guarantee a SAMPLE trigger even when DPPI h_sample is
+         * not firing. Each trigger = 1 scan; after 8 scans the buffer fills
+         * and g_raw is updated via the DONE callback. */
+        /* Phase dither: k_msleep(1) == 1 ms == exactly 25 x 40 µs, so
+         * successive SW triggers would all land at the same PWM phase,
+         * causing the offset average to lock onto a switching transient
+         * instead of the quiet bias level. Adding 1 µs per iteration shifts
+         * the trigger phase by 1 µs each round; after 40 rounds we have
+         * sampled the full 40 µs period. Over 500 rounds this gives ~12.5
+         * complete rotations through the period - a good uniform average. */
+        k_busy_wait((uint32_t)(n % 40) + 1U);
+        if (g_armed) {
+            nrf_saadc_task_trigger(NRF_SAADC, NRF_SAADC_TASK_SAMPLE);
+        }
         float v[NUM_CH];
         isense_read_volts(v);
         acc[0] += v[0];
@@ -433,7 +462,8 @@ int current_sense_calibrate_offsets(void)
     LOG_INF("offsets calibrated: SOA=%.3f SOB=%.3f SOC=%.3f V (expect ~VREF/2, %u synced scans)",
             (double)g_offset_v[0], (double)g_offset_v[1], (double)g_offset_v[2], scans);
     if (scans == 0) {
-        LOG_WRN("NO HW-synced scans during calibration - is PWM0 running?");
+        LOG_WRN("NO HW-synced scans during calibration - is PWM0 running? "
+                "(buf_req=%u)", g_buf_req_count);
     }
     return 0;
 }
@@ -444,6 +474,14 @@ phase_current_t current_sense_get_phase_currents(void)
 
     if (!g_ready) {
         return c;
+    }
+
+    /* SW fallback: fire a SAMPLE trigger so the SAADC keeps accumulating even
+     * when the DPPI h_sample chain is not working. DONE fires after 8 calls
+     * (BUF_LEN/NUM_SCAN_CH = 8 scans per buffer) and refreshes g_raw.
+     * At 1 kHz call rate the current readings are at most ~8 ms stale. */
+    if (g_armed) {
+        nrf_saadc_task_trigger(NRF_SAADC, NRF_SAADC_TASK_SAMPLE);
     }
 
     float v[NUM_CH];
