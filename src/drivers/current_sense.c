@@ -124,7 +124,7 @@ static float g_last_v[NUM_CH] = {0.0f, 0.0f, 0.0f};
 static float g_last_i[NUM_CH] = {0.0f, 0.0f, 0.0f};
 
 /* GPPI (DPPI on the nRF5340) connection handles. */
-static nrfx_gppi_handle_t h_clear;    /* PWM LOOPSDONE -> TIMER CLEAR  */
+static nrfx_gppi_handle_t h_clear;    /* PWM SEQSTARTED0 -> TIMER CLEAR  */
 static nrfx_gppi_handle_t h_sample;   /* TIMER COMPARE0 -> SAADC SAMPLE */
 /* h_start removed: start_on_end=true lets nrfx handle START in software
  * after each END, ensuring EasyDMA buffer is programmed before START fires. */
@@ -307,14 +307,15 @@ int current_sense_init(void)
     /* Bring up TIMER2 + program its centre-of-period compare. */
     isense_timer_dppi_setup();
 
-    /* DPPI ch A: PWM0 LOOPSDONE -> TIMER2 CLEAR (re-zero the timer at every
-     * PWM period boundary so COMPARE0 stays phase-locked).
+    /* DPPI ch A: PWM0 SEQSTARTED0 -> TIMER2 CLEAR (re-zero the timer at the
+     * start of every one-shot playback so COMPARE0 stays aligned to the quiet
+     * zone at counter=0).
      *
-     * PWMPERIODEND never fires in LOOP=1 + SHORTS=LOOPSDONE_SEQSTART0 mode:
-     * the SHORT restarts the sequence before the hardware generates the
-     * period-end event. LOOPSDONE fires at the same period boundary and is
-     * confirmed to fire (it drives the SHORT that keeps the motor running). */
-    uint32_t pwm_evt    = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE);
+     * With LOOP=0 (one-shot) + explicit SEQSTART[0] in write_duty_cycles(),
+     * SEQSTARTED0 fires every ~1 ms (each haptic tick).  TIMER2 COMPARE0@64
+     * fires 4 µs after each reset = quiet zone (all low-sides ON) for the
+     * SAADC scan.  LOOPSDONE is never generated with LOOP=0. */
+    uint32_t pwm_evt    = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0);
     uint32_t tmr_clear  = nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR);
     ret = nrfx_gppi_conn_alloc(pwm_evt, tmr_clear, &h_clear);
     if (ret != 0) {
@@ -337,19 +338,19 @@ int current_sense_init(void)
 
     /* ---- DPPI diagnostic dump ---- */
     {
-        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE) + 0x80U));
+        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0) + 0x80U));
         uint32_t sub_tmr  = *((volatile uint32_t *)(nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR) + 0x80U));
         uint32_t pub_tmr  = *((volatile uint32_t *)(nrf_timer_event_address_get(ISENSE_TIMER, NRF_TIMER_EVENT_COMPARE0) + 0x80U));
         uint32_t sub_saad = *((volatile uint32_t *)(nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE) + 0x80U));
         LOG_INF("DPPI alloc: h_clear=%d h_sample=%d CHEN=0x%08x",
                 (int)h_clear, (int)h_sample, NRF_DPPIC->CHEN);
-        LOG_INF("DPPI regs: PUB_PWMEND=0x%08x SUB_TMRCLEAR=0x%08x",
+        LOG_INF("DPPI regs: PUB_PWMSEQSTART=0x%08x SUB_TMRCLEAR=0x%08x",
                 pub_pwm, sub_tmr);
         LOG_INF("DPPI regs: PUB_TMRCMP0=0x%08x SUB_SAADCSMP=0x%08x",
                 pub_tmr, sub_saad);
-        /* Verify TIMER2 is being cleared by LOOPSDONE via h_clear.
+        /* Verify TIMER2 is being cleared by SEQSTARTED0 via h_clear.
          * Two captures 100 us apart: if h_clear works both reads are <640 (one
-         * PWM period); if h_clear is broken the counter grows ~1600 per 100 us. */
+         * PWM period); if h_clear is broken the counter grows freely. */
         nrf_timer_task_trigger(ISENSE_TIMER, NRF_TIMER_TASK_CAPTURE2);
         uint32_t tc0 = nrf_timer_cc_get(ISENSE_TIMER, NRF_TIMER_CC_CHANNEL2);
         k_busy_wait(100U);
@@ -358,12 +359,14 @@ int current_sense_init(void)
         LOG_INF("TIMER2 cnt: t0=%u t1=%u diff=%d (h_clear OK if diff<640)",
                 tc0, tc1, (int)(tc1 - tc0));
 
-        /* Check if LOOPSDONE actually fires. Clear, wait 3 periods (~120us), read. */
-        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE);
-        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE);
+        /* Check if SEQSTARTED0 actually fires. Clear, trigger a SEQSTART (via
+         * a dummy write_duty_cycles call would be ideal, but here just wait
+         * >1 ms for the haptic loop to fire one), read the event register. */
+        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0);
+        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0);
         k_busy_wait(150U);
         uint32_t pwm_evt_fired = *((volatile uint32_t *)pwm_evt_addr);
-        LOG_INF("LOOPSDONE: addr=0x%08x fired=%u (1=h_clear source OK, 0=stalled)",
+        LOG_INF("SEQSTARTED0: addr=0x%08x fired=%u (1=h_clear source OK, 0=no playback yet)",
                 pwm_evt_addr, pwm_evt_fired);
         LOG_INF("Periph addrs: NRF_PWM0=%p NRF_TIMER2=%p NRF_DPPIC=%p",
                 (void *)NRF_PWM0, (void *)ISENSE_TIMER, (void *)NRF_DPPIC);

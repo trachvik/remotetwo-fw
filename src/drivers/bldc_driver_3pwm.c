@@ -3,7 +3,6 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/logging/log.h>
-#include <hal/nrf_pwm.h>
 
 LOG_MODULE_REGISTER(bldc_drv3pwm, LOG_LEVEL_INF);
 
@@ -16,9 +15,7 @@ LOG_MODULE_REGISTER(bldc_drv3pwm, LOG_LEVEL_INF);
 /* ------------------------------------------------------------------ */
 #define DRV_NODE DT_NODELABEL(bldc_drv)
 
-/* PWM channels: INA = idx 0, INB = idx 1, INC = idx 2
- * Kept only for the initial Zephyr PWM initialisation call that triggers
- * pinctrl (pin routing). Actual PWM is driven by nrfx_pwm directly. */
+/* PWM channels: INA = idx 0, INB = idx 1, INC = idx 2 */
 static const struct pwm_dt_spec pwm_ina = PWM_DT_SPEC_GET_BY_IDX(DRV_NODE, 0);
 static const struct pwm_dt_spec pwm_inb = PWM_DT_SPEC_GET_BY_IDX(DRV_NODE, 1);
 static const struct pwm_dt_spec pwm_inc = PWM_DT_SPEC_GET_BY_IDX(DRV_NODE, 2);
@@ -27,28 +24,6 @@ static const struct pwm_dt_spec pwm_inc = PWM_DT_SPEC_GET_BY_IDX(DRV_NODE, 2);
 static const struct gpio_dt_spec gpio_inl   = GPIO_DT_SPEC_GET(DRV_NODE, inl_gpios);
 static const struct gpio_dt_spec gpio_sleep = GPIO_DT_SPEC_GET(DRV_NODE, sleep_gpios);
 static const struct gpio_dt_spec gpio_fault = GPIO_DT_SPEC_GET(DRV_NODE, fault_gpios);
-
-/* ------------------------------------------------------------------ */
-/* Center-aligned PWM via direct NRF_PWM0 register access             */
-/* (NRF_PWM_MODE_UP_AND_DOWN)                                          */
-/*                                                                     */
-/* Edge-aligned places ALL switching edges at t=0, creating a large   */
-/* simultaneous transient on the CSA outputs that contaminates most   */
-/* of the 40 us period.  Center-aligned spreads each phase's edges    */
-/* individually; the t=0 boundary (counter bottom) has NO simultaneous*/
-/* switching.  The all-low-sides-on window at the start of the period */
-/* is quiet, giving at least 15 us for the 3-channel SAADC scan.      */
-/*                                                                     */
-/* COUNTERTOP=320 -> period = 2*320/16MHz = 40 us = 25 kHz.           */
-/* ------------------------------------------------------------------ */
-#define PWM_CENTER_ALIGNED_COUNTERTOP 320u   /* 16 MHz / (2*320) = 25 kHz */
-
-/* Sequence buffer in RAM: 4 x uint16_t for NRF_PWM_LOAD_INDIVIDUAL mode.
- * [0]=INA  [1]=INB  [2]=INC  [3]=unused (0% duty, inverted).
- * bit[15]=1 (INVERTED polarity) | bits[14:0]=compare ticks.
- * Updating the buffer takes effect on the next period without restarting. */
-#define PWM_SEQ_SIZE 4u
-static uint16_t m_seq_buf[PWM_SEQ_SIZE];
 
 /* nFAULT interrupt bookkeeping */
 static struct gpio_callback fault_cb_data;
@@ -64,37 +39,60 @@ static void fault_isr(const struct device *dev, struct gpio_callback *cb,
 }
 
 /* ------------------------------------------------------------------ */
-/* Internal helper: update center-aligned duty cycles via NRF_PWM0   */
+/* Internal helper: write duty cycles directly to PWM hardware        */
 /* ------------------------------------------------------------------ */
-/* Convert a phase voltage fraction [0,1] to a sequence compare value
- * for UP_AND_DOWN mode with INVERTED polarity.
- * The high-side FET is ON when counter >= compare (near the TOP).
- * compare = (1-D) * COUNTERTOP, bit[15] = 1 (inverted polarity). */
-static inline uint16_t duty_to_compare(float duty)
-{
-    if (duty > 1.0f) duty = 1.0f;
-    if (duty < 0.0f) duty = 0.0f;
-    uint16_t cmp = (uint16_t)((1.0f - duty) * (float)PWM_CENTER_ALIGNED_COUNTERTOP);
-    return cmp | 0x8000u; /* bit[15] = INVERTED polarity */
-}
+/*
+ * PWM_LOWSIDE_SYNC: invert the PWM polarity (and compensate the pulse width)
+ * so the DRV8311H low-side conduction window sits at the START of each PWM
+ * period, immediately after PWMPERIODEND. That is exactly when the SAADC is
+ * hardware-triggered (see current_sense.c), so the synced sample lands while
+ * the low-side shunt carries the phase current.
+ *
+ * Inverting + writing pulse = (period - pa) keeps the HIGH-side conduction
+ * time identical to the non-inverted case (= dc_a * period), so the motor
+ * phase voltage is unchanged - only the position of the low-side window moves.
+ *
+ * NOTE: temporarily disabled (set to 0) while diagnosing the SAADC sampling -
+ * inverted polarity makes a 0% command become a 100% pulse, which the Zephyr
+ * nrfx PWM driver treats as a constant level and stops the peripheral, killing
+ * the PWMPERIODEND event. Running NORMAL polarity first to capture clean
+ * per-phase raw-voltage diagnostics.
+ */
+#define PWM_LOWSIDE_SYNC 0
 
 static void write_duty_cycles(uint32_t period_ns, float dc_a, float dc_b, float dc_c)
 {
-    ARG_UNUSED(period_ns); /* period is fixed by COUNTERTOP */
+    uint32_t pa = (uint32_t)(_CONSTRAIN(dc_a, 0.0f, 1.0f) * (float)period_ns);
+    uint32_t pb = (uint32_t)(_CONSTRAIN(dc_b, 0.0f, 1.0f) * (float)period_ns);
+    uint32_t pc = (uint32_t)(_CONSTRAIN(dc_c, 0.0f, 1.0f) * (float)period_ns);
 
-    m_seq_buf[0] = duty_to_compare(dc_a);
-    m_seq_buf[1] = duty_to_compare(dc_b);
-    m_seq_buf[2] = duty_to_compare(dc_c);
-    m_seq_buf[3] = 0x8000u; /* unused 4th channel: 0% duty, inverted */
-    /* Re-assert the DMA pointer every write: the Zephyr nrfx_pwm IRQ handler
-     * (if it fires before INTENCLR takes effect) may change SEQ[0].PTR to its
-     * own buffer.  Writing it here guarantees the next SEQSTART reads m_seq_buf
-     * regardless of any prior IRQ-driven change. */
-    NRF_PWM0->SEQ[0].PTR = (uint32_t)(uintptr_t)m_seq_buf;
-    NRF_PWM0->SEQ[0].CNT = PWM_SEQ_SIZE;
+#if PWM_LOWSIDE_SYNC
+    /* Inverted polarity: active (LOW) pulse = period - pa at the start of the
+     * period -> low-side ON window is [0, period - pa). High-side ON time is
+     * the remainder = pa, preserving the commanded phase voltage. */
+    int r0 = pwm_set(pwm_ina.dev, pwm_ina.channel, period_ns, period_ns - pa,
+                     PWM_POLARITY_INVERTED);
+    int r1 = pwm_set(pwm_inb.dev, pwm_inb.channel, period_ns, period_ns - pb,
+                     PWM_POLARITY_INVERTED);
+    int r2 = pwm_set(pwm_inc.dev, pwm_inc.channel, period_ns, period_ns - pc,
+                     PWM_POLARITY_INVERTED);
+#else
+    int r0 = pwm_set_dt(&pwm_ina, period_ns, pa);
+    int r1 = pwm_set_dt(&pwm_inb, period_ns, pb);
+    int r2 = pwm_set_dt(&pwm_inc, period_ns, pc);
+#endif
+
+    if (r0 || r1 || r2) {
+        static bool logged_once = false;
+        if (!logged_once) {
+            logged_once = true;
+            LOG_ERR("pwm_set_dt failed: INA=%d INB=%d INC=%d (period=%u)",
+                    r0, r1, r2, period_ns);
+        }
+    }
 }
 
-/* Cached period so API callers don't need to recompute */
+/* Cached period so set_pwm doesn't recompute every call */
 static uint32_t g_period_ns = 0;
 
 /* ------------------------------------------------------------------ */
@@ -127,64 +125,20 @@ int bldc_driver_3pwm_init_hw(bldc_driver_3pwm_t *driver)
         driver->voltage_limit = driver->voltage_power_supply;
     }
 
-    /* Trigger Zephyr PWM driver once per channel to activate pinctrl
-     * (routes the three GPIO pins to PWM_OUT0/1/2). After this we take over
-     * the peripheral with direct register writes. */
+    /* Verify PWM channels */
     if (!pwm_is_ready_dt(&pwm_ina) ||
         !pwm_is_ready_dt(&pwm_inb) ||
         !pwm_is_ready_dt(&pwm_inc)) {
         LOG_ERR("One or more PWM channels not ready");
         return DRIVER_INIT_FAILED;
     }
-    (void)pwm_set_dt(&pwm_ina, PWM_KHZ(25), 0);
-    (void)pwm_set_dt(&pwm_inb, PWM_KHZ(25), 0);
-    (void)pwm_set_dt(&pwm_inc, PWM_KHZ(25), 0);
 
-    /* ---- Stop the Zephyr-started edge-aligned PWM ---- */
-    NRF_PWM0->EVENTS_STOPPED = 0;
-    NRF_PWM0->TASKS_STOP     = 1;
-    for (int i = 0; i < 1000 && !NRF_PWM0->EVENTS_STOPPED; i++) {
-        k_busy_wait(1);
-    }
-    NRF_PWM0->EVENTS_STOPPED = 0;
-
-    /* ---- Init sequence buffer at 50% duty (neutral, zero torque) ---- */
-    m_seq_buf[0] = duty_to_compare(0.5f);
-    m_seq_buf[1] = duty_to_compare(0.5f);
-    m_seq_buf[2] = duty_to_compare(0.5f);
-    m_seq_buf[3] = 0x8000u;
-
-    /* ---- Configure NRF_PWM0 for CENTER-ALIGNED (UP_AND_DOWN) at 25 kHz ----
-     * COUNTERTOP=320, 16 MHz clock -> period = 2*320/16e6 = 40 us = 25 kHz.
-     * INDIVIDUAL decoder: each of the 4 entries sets one channel independently.
-     * LOOPSDONE->SEQSTART0 shortcut creates infinite hardware loop. */
-    NRF_PWM0->PRESCALER  = PWM_PRESCALER_PRESCALER_DIV_1;
-    NRF_PWM0->MODE       = (PWM_MODE_UPDOWN_UpAndDown << PWM_MODE_UPDOWN_Pos);
-    NRF_PWM0->COUNTERTOP = PWM_CENTER_ALIGNED_COUNTERTOP;
-    NRF_PWM0->DECODER    = (PWM_DECODER_LOAD_Individual << PWM_DECODER_LOAD_Pos) |
-                           (PWM_DECODER_MODE_RefreshCount << PWM_DECODER_MODE_Pos);
-    NRF_PWM0->LOOP       = 1;
-
-    NRF_PWM0->SEQ[0].PTR      = (uint32_t)(uintptr_t)m_seq_buf;
-    NRF_PWM0->SEQ[0].CNT      = PWM_SEQ_SIZE;
-    NRF_PWM0->SEQ[0].REFRESH  = 0;
-    NRF_PWM0->SEQ[0].ENDDELAY = 0;
-
-    NRF_PWM0->SHORTS = PWM_SHORTS_LOOPSDONE_SEQSTART0_Msk;
-    NRF_PWM0->TASKS_SEQSTART[0] = 1;
-    /* Disable ALL NRF_PWM0 interrupts.  The Zephyr nrfx_pwm driver registered
-     * a SEQEND0/LOOPSDONE IRQ handler during pwm_set_dt(); if left enabled it
-     * fires every 40 us and may change SEQ[0].PTR to its own internal buffer,
-     * making our m_seq_buf writes invisible to the DMA.  We use the
-     * LOOPSDONE->SEQSTART0 hardware shortcut for the infinite loop (no CPU
-     * needed) and DPPI for the SAADC sample trigger, so no IRQ is required. */
-    NRF_PWM0->INTENCLR = 0xFFFFFFFFUL;
-    LOG_INF("NRF_PWM0 center-aligned (UP_AND_DOWN) started: COUNTERTOP=%u (25 kHz)",
-            PWM_CENTER_ALIGNED_COUNTERTOP);
-
-    /* Compute and cache the effective period in ns for callers. */
+    /* Compute and cache PWM period */
     long freq = (driver->pwm_frequency > 0) ? driver->pwm_frequency : 25000;
     g_period_ns = (uint32_t)(1000000000UL / (unsigned long)freq);
+
+    /* All channels to 0 % duty cycle */
+    write_duty_cycles(g_period_ns, 0.0f, 0.0f, 0.0f);
 
     /* Configure nSLEEP – reset pulse (LOW→HIGH) clears any latched faults */
     if (!gpio_is_ready_dt(&gpio_sleep)) {
@@ -243,7 +197,7 @@ int bldc_driver_3pwm_init_hw(bldc_driver_3pwm_t *driver)
             gpio_sleep.pin);
 
     driver->initialized = true;
-    LOG_INF("DRV8311H 3PWM driver ready (CENTER-ALIGNED 25 kHz): freq=%ld Hz, period=%u ns, Vsupply=%.1f V",
+    LOG_INF("DRV8311H 3PWM driver ready: freq=%ld Hz, period=%u ns, Vsupply=%.1f V",
             freq, g_period_ns, (double)driver->voltage_power_supply);
 
     return DRIVER_INIT_OK;
