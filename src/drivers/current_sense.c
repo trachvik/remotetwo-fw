@@ -74,13 +74,15 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  * end of the period (the symmetrical quiet window near t=40 us). */
 #define ISENSE_SAMPLE_FRACTION 0.1f
 
-/* Phase-A reconstruction. Previously assumed SOA was a permanent HW fault (cold
- * joint). That was DISPROVEN: the saturation is a sampling-instant artifact and
- * walks between SOA and SOB depending on rotor rest position (see
- * ISENSE_SAMPLE_FRACTION above), so no single channel is dead. With the sample
- * point moved into the quiet low-side window all three shunts read correctly,
- * so reconstruction is OFF and the directly-measured three-shunt currents are
- * used. (Re-enable only as a fallback if one shunt is later proven dead.) */
+/* Phase-A reconstruction.
+ * OFF: all three shunts are healthy when the correct 0-indexed
+ * NRFX_ANALOG_EXTERNAL_AINx enum values are used (see m_channels below).
+ * The earlier stuck-SOA reading was caused by passing NRF_SAADC_INPUT_AINx
+ * (1-indexed, AIN0=1) to NRFX_SAADC_DEFAULT_CHANNEL_SE whose pin_p field
+ * is nrfx_analog_input_t (0-indexed, AIN0=0), shifting every channel by +1:
+ * "SOA" was reading AIN7/P0.28 (unconnected -> ~3.3V), "SOB" was reading
+ * actual SOA, "SOC" was reading actual SOB, and actual SOC was never sampled.
+ * (Re-enable only as a hardware fallback if one shunt is later proven dead.) */
 #define ISENSE_RECONSTRUCT_PHASE_A 0
 
 /* TIMER instance used as the PWM-locked sample timer. TIMER2 is not claimed by
@@ -148,10 +150,16 @@ static volatile uint32_t  g_buf_req_count = 0;
 static nrfx_saadc_channel_t m_channels[NUM_SCAN_CH] = {
     /* Scan order = channel-index ascending. Center-aligned PWM keeps the CSA
      * outputs quiet from t=0 to ~8 us; these three conversions at ~4/9/14 us
-     * all land in that quiet window. */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN6, 0), /* SOA – P0.27 */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN5, 1), /* SOB – P0.26 */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN4, 2), /* SOC – P0.25 */
+     * all land in that quiet window.
+     *
+     * IMPORTANT: use NRFX_ANALOG_EXTERNAL_AINx (0-indexed: AIN0=0, AIN6=6)
+     * NOT NRF_SAADC_INPUT_AINx (1-indexed: AIN0=1, AIN6=7). The macro
+     * NRFX_SAADC_DEFAULT_CHANNEL_SE stores the value directly into the
+     * nrfx_analog_input_t pin_p field without any offset adjustment, so
+     * mixing enum families silently shifts all channels by +1. */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN6, 0), /* SOA – P0.27 */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN5, 1), /* SOB – P0.26 */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN4, 2), /* SOC – P0.25 */
 };
 
 /* ------------------------------------------------------------------ */
@@ -322,9 +330,15 @@ int current_sense_init(void)
     /* Bring up TIMER2 + program its centre-of-period compare. */
     isense_timer_dppi_setup();
 
-    /* DPPI ch A: PWM0 PWMPERIODEND -> TIMER2 CLEAR (re-zero the timer at the
-     * start of every PWM period so COMPARE0 stays phase-locked). */
-    uint32_t pwm_evt    = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
+    /* DPPI ch A: PWM0 LOOPSDONE -> TIMER2 CLEAR (re-zero the timer at every
+     * PWM period boundary so COMPARE0 stays phase-locked).
+     *
+     * PWMPERIODEND never fires in LOOP=1 + SHORTS=LOOPSDONE_SEQSTART0 mode:
+     * the SHORT restarts the sequence before the hardware generates the
+     * period-end event. LOOPSDONE fires at the same period boundary (count=0
+     * in UP_AND_DOWN mode) and is confirmed to fire (it drives the SHORT that
+     * keeps the motor running). */
+    uint32_t pwm_evt    = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE);
     uint32_t tmr_clear  = nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR);
     ret = nrfx_gppi_conn_alloc(pwm_evt, tmr_clear, &h_clear);
     if (ret != 0) {
@@ -347,7 +361,7 @@ int current_sense_init(void)
 
     /* ---- DPPI diagnostic dump ---- */
     {
-        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND) + 0x80U));
+        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE) + 0x80U));
         uint32_t sub_tmr  = *((volatile uint32_t *)(nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR) + 0x80U));
         uint32_t pub_tmr  = *((volatile uint32_t *)(nrf_timer_event_address_get(ISENSE_TIMER, NRF_TIMER_EVENT_COMPARE0) + 0x80U));
         uint32_t sub_saad = *((volatile uint32_t *)(nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE) + 0x80U));
@@ -368,15 +382,14 @@ int current_sense_init(void)
         LOG_INF("TIMER2 cnt: t0=%u t1=%u diff=%d (h_clear OK if diff<640)",
                 tc0, tc1, (int)(tc1 - tc0));
 
-        /* Check if PWMPERIODEND actually fires. Clear the latched event,
-         * wait 3 PWM periods (3*40µs=120µs), then read back. A non-zero
-         * value means the PWM is running and the event DOES fire; if it
-         * stays 0 the PWM is stalled and h_clear can never work. */
-        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
-        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
+        /* Check if LOOPSDONE actually fires (it drives the SHORT that keeps
+         * the PWM running, so fired=1 confirms both PWM running and h_clear
+         * trigger available). Clear, wait 3 periods (3*40us=120us), read. */
+        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE);
+        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_LOOPSDONE);
         k_busy_wait(150U);
         uint32_t pwm_evt_fired = *((volatile uint32_t *)pwm_evt_addr);
-        LOG_INF("PWMPERIODEND: addr=0x%08x fired=%u (1=PWM running, 0=stalled)",
+        LOG_INF("LOOPSDONE: addr=0x%08x fired=%u (1=h_clear source OK, 0=stalled)",
                 pwm_evt_addr, pwm_evt_fired);
         LOG_INF("Periph addrs: NRF_PWM0=%p NRF_TIMER2=%p NRF_DPPIC=%p",
                 (void *)NRF_PWM0, (void *)ISENSE_TIMER, (void *)NRF_DPPIC);
