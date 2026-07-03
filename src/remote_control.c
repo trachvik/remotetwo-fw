@@ -102,7 +102,7 @@ static int g_pending_click_dir = 0;
 static atomic_t g_menu_refresh_pending = ATOMIC_INIT(0);
 static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 
-#define DOUBLE_CLICK_WINDOW_MS  350
+#define DOUBLE_CLICK_WINDOW_MS  500
 #define SMOOTH_MENU_STEP_DIV    3
 #define DISPLAY_IDLE_TIMEOUT_MS 20000
 

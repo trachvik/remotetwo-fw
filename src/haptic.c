@@ -29,7 +29,7 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define SMOOTH_VDETENT_STEP_RAD (_2PI / (float)SMOOTH_VDETENT_STEPS)
 #define SMOOTH_VDETENT_ARM_VEL 0.12f
 #define SMOOTH_VDETENT_ARM_MS 80
-#define VCLICK_HOLD_MS 500
+#define VCLICK_HOLD_MS 150
 #define VCLICK_LONG_HOLD_MS 2000 /* reserved for future mode-select command */
 #define GESTURE_ARM_ZONE_MIN   0.14f /* slightly smaller dead zone for Enter/Back evaluation */
 #define GESTURE_RELEASE_ZONE   0.09f /* slightly tighter release zone to reset gesture */
@@ -292,7 +292,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     bldc_motor_link_sensor(motor, encoder);
 
     /* Configure motor parameters */
-    motor->voltage_limit = HAPTIC_VOLTAGE_LIMIT;
+    motor->voltage_limit = HAPTIC_VOLTAGE_LIMIT*0.58f;  /* V, limit to 58% of supply to avoid saturation */
     motor->velocity_limit = 20.0f;  /* rad/s */
     motor->voltage_sensor_align = 1.5f;
 
@@ -758,12 +758,22 @@ void haptic_loop(bldc_motor_t *motor)
      * phase currents purely for the SerialPlot "DATA:ia,ib,ic" [mA] stream.
      * loop_foc() does NOT read the SAADC in VOLTAGE mode, so trigger a fresh
      * read here. Phase A is reconstructed as -(Ib+Ic) inside current_sense. */
-    if (current_sense_is_ready()) {
-        phase_current_t pc = current_sense_get_phase_currents();
-        printk("DATA:%d,%d,%d\n",
-               (int)(pc.a * 1000.0f),
-               (int)(pc.b * 1000.0f),
-               (int)(pc.c * 1000.0f));
+    {
+        if (current_sense_is_ready()) {
+            /* Call get_phase_currents() every tick (not gated on sc) so the
+             * SW SAMPLE fallback inside it fires at 1 kHz and the SAADC
+             * never stalls when DPPI h_sample is not running. */
+            phase_current_t pc = current_sense_get_phase_currents();
+            static uint32_t last_sc = 0;
+            uint32_t sc = current_sense_get_scan_count();
+            if (sc != last_sc) {
+                last_sc = sc;
+                printk("DATA:%d,%d,%d\n",
+                       (int)(pc.a * 1000.0f),
+                       (int)(pc.b * 1000.0f),
+                       (int)(pc.c * 1000.0f));
+            }
+        }
     }
 #endif
 }
