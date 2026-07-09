@@ -292,7 +292,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     bldc_motor_link_sensor(motor, encoder);
 
     /* Configure motor parameters */
-    motor->voltage_limit = HAPTIC_VOLTAGE_LIMIT;
+    motor->voltage_limit = HAPTIC_VOLTAGE_LIMIT*0.58; // 0.58 has to be here so SVPWM does not saturate at 3.75V supply, 0.58*3.75=2.175V
     motor->velocity_limit = 20.0f;  /* rad/s */
     motor->voltage_sensor_align = 1.5f;
 

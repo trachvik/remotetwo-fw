@@ -53,9 +53,10 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  * ISENSE_SAMPLE_FRACTION below is the single knob for this.
  *
  * Channel / pin map (SAADC scan order = channel_index ascending):
- *   index 0 -> AIN6 = P0.27 = SOA
- *   index 1 -> AIN5 = P0.26 = SOB
- *   index 2 -> AIN4 = P0.25 = SOC
+ *   index 0 -> AIN5 = P0.26 = SOC   (scanned first)
+ *   index 1 -> AIN4 = P0.25 = SOB   (scanned second)
+ *   SOA is NOT scanned; it is reconstructed from Ia = -(Ib+Ic).
+ * NOTE: AIN4/AIN5 are swapped relative to DRV8311H SO_B/SO_C pin labels.
  */
 
 /* Fraction of the PWM period at which TIMER2.COMPARE[0] fires the SAADC sample.
@@ -75,22 +76,33 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  * but the quiet CSA window is now at the START of every period.
  *
  * PWMPERIODEND fires at counter=COUNTERTOP.  TIMER2 clears immediately.
- * After 0.1 * period (= 4 us, counter=64) COMPARE0 fires -> SAADC SAMPLE.
- * With dc < 0.9 (V_phase < 3.375 V) counter=64 is always inside the quiet
- * window. All three acquisitions (SOA ~4us, SOB ~9us, SOC ~14us) complete
- * well before any high-side transition for typical haptic voltages (<= 1.5 V). */
-#define ISENSE_SAMPLE_FRACTION 0.1f
+ * After fraction * period COMPARE0 fires -> SAADC SAMPLE.
+ *
+ * 3-CHANNEL TIMING CONSTRAINT (why 3 channels cannot work):
+ * Each SAADC channel takes ~5 us (3 us acq + ~2 us conv = 80 ticks at 16 MHz).
+ * With 3 channels the last (SOC) acquisition ends at:
+ *   sample_tick + 2*80 + 80 = sample_tick + 240 ticks
+ * For the phase at its positive peak (dc_max=0.70, V=1.5 V) the quiet window
+ * is only (1-0.70)*640 = 192 ticks.  No matter how early the sample fires,
+ * SOC always exceeds 192 ticks when it is third in line (sample+240 > 192).
+ * This caused B and C to read ~0 at their positive voltage peaks, appearing
+ * as channel-swapping discontinuities in the SerialPlot stream.
+ *
+ * FIX - 2-channel scan + phase-A reconstruction:
+ * Scan only SOB and SOC (2 channels, 10 us total).  Starting at fraction=0.04
+ * (counter=26, 1.6 us settling after the LOW-side turn-on):
+ *   SOB acquisition: counter  26 - 106   quiet_B >= 192 for dc_B <= 0.834  ✓
+ *   SOC acquisition: counter 106 - 186   quiet_C = 192 for dc_C = 0.70     ✓
+ * Phase A is recovered exactly: Ia = -(Ib + Ic) (Kirchhoff; balanced load). */
+#define ISENSE_SAMPLE_FRACTION 0.04f
 
 /* Phase-A reconstruction.
- * OFF: all three shunts are healthy when the correct 0-indexed
- * NRFX_ANALOG_EXTERNAL_AINx enum values are used (see m_channels below).
- * The earlier stuck-SOA reading was caused by passing NRF_SAADC_INPUT_AINx
- * (1-indexed, AIN0=1) to NRFX_SAADC_DEFAULT_CHANNEL_SE whose pin_p field
- * is nrfx_analog_input_t (0-indexed, AIN0=0), shifting every channel by +1:
- * "SOA" was reading AIN7/P0.28 (unconnected -> ~3.3V), "SOB" was reading
- * actual SOA, "SOC" was reading actual SOB, and actual SOC was never sampled.
- * (Re-enable only as a hardware fallback if one shunt is later proven dead.) */
-#define ISENSE_RECONSTRUCT_PHASE_A 0
+ * ON: SOA is not scanned; Ia is recovered from Ia = -(Ib + Ic).
+ * This is required because the 2-channel scan (SOB+SOC only) eliminates the
+ * timing violation that caused B and C to read ~0 at their positive peaks.
+ * The SOA shunt is electrically healthy but deliberately excluded from the
+ * scan to keep the total acquisition window short enough. */
+#define ISENSE_RECONSTRUCT_PHASE_A 1
 
 /* TIMER instance used as the PWM-locked sample timer. TIMER2 is not claimed by
  * the Zephyr system clock (RTC1) nor by any driver on this target. */
@@ -108,7 +120,7 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
 #define CSA_AMPS_PER_V   (1.0f / CSA_GAIN_V_PER_A)
 
 #define NUM_CH        3                       /* reported phase channels SOA,SOB,SOC */
-#define NUM_SCAN_CH   NUM_CH                  /* all three real channels */
+#define NUM_SCAN_CH   2                       /* SOB + SOC only; SOA reconstructed */
 #define SCANS_PER_BUF 100
 #define BUF_LEN       (NUM_SCAN_CH * SCANS_PER_BUF)
 
@@ -146,12 +158,13 @@ static volatile bool      g_armed = false;
 static volatile uint32_t  g_buf_req_count = 0;
 
 static nrfx_saadc_channel_t m_channels[NUM_SCAN_CH] = {
-    /* IMPORTANT: use NRFX_ANALOG_EXTERNAL_AINx (0-indexed: AIN0=0, AIN6=6)
-     * NOT NRF_SAADC_INPUT_AINx (1-indexed: AIN0=1, AIN6=7). Mixing enum
-     * families silently shifts all channels by +1. */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN6, 0), /* SOA - P0.27 */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN5, 1), /* SOB - P0.26 */
-    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN4, 2), /* SOC - P0.25 */
+    /* IMPORTANT: use NRFX_ANALOG_EXTERNAL_AINx (0-indexed: AIN0=0, AIN5=5, AIN4=4)
+     * NOT NRF_SAADC_INPUT_AINx (1-indexed). channel_idx sets the SAADC HW channel
+     * register (0..7) and determines scan order (ascending index).
+     * Physical mapping (empirically verified): AIN5/P0.26 = SOC, AIN4/P0.25 = SOB
+     * (inverted relative to DRV8311H SO_B/SO_C pin names on schematic). */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN5, 0), /* SOC - P0.26, scanned 1st */
+    NRFX_SAADC_DEFAULT_CHANNEL_SE(NRFX_ANALOG_EXTERNAL_AIN4, 1), /* SOB - P0.25, scanned 2nd */
 };
 
 /* ------------------------------------------------------------------ */
@@ -181,10 +194,15 @@ static void saadc_handler(nrfx_saadc_evt_t const *p_event)
     case NRFX_SAADC_EVT_DONE: {
         nrf_saadc_value_t *b = p_event->data.done.p_buffer;
         uint16_t n = p_event->data.done.size;
-        if (n >= NUM_CH) {
-            g_raw[0] = b[n - 3];
-            g_raw[1] = b[n - 2];
-            g_raw[2] = b[n - 1];
+        /* With NUM_SCAN_CH=2 the buffer layout is [ch0,ch1, ch0,ch1, ...]
+         * ch0 = AIN5 (P0.26), ch1 = AIN4 (P0.25).
+         * Empirically AIN4/P0.25 carries phase B current and
+         * AIN5/P0.26 carries phase C current (opposite to DRV8311H SO_x
+         * pin labeling on this board).  Assignments below reflect reality.
+         * g_raw[0] (SOA) is not updated here; reconstructed via Kirchhoff. */
+        if (n >= NUM_SCAN_CH) {
+            g_raw[2] = b[n - 2];   /* SOC  (ch0, AIN5, P0.26) */
+            g_raw[1] = b[n - 1];   /* SOB  (ch1, AIN4, P0.25) */
             g_scan_count++;
         }
         break;
@@ -283,14 +301,14 @@ int current_sense_init(void)
     }
     irq_enable(NRFX_IRQ_NUMBER_GET(NRF_SAADC));
 
-    /* Override macro defaults: gain 1/6 (full scale 3.6 V) and a short 3 us
-     * acquisition so all three channels fit inside the low-side window. */
-    for (int i = 0; i < NUM_CH; i++) {
+    /* Override macro defaults: gain 1/6 (full scale 3.6 V) and minimum 3 us
+     * acquisition time.  Only NUM_SCAN_CH=2 channels are configured. */
+    for (int i = 0; i < NUM_SCAN_CH; i++) {
         m_channels[i].channel_config.gain     = NRF_SAADC_GAIN1_6;
         m_channels[i].channel_config.acq_time = NRF_SAADC_ACQTIME_3US;
     }
 
-    ret = nrfx_saadc_channels_config(m_channels, NUM_CH);
+    ret = nrfx_saadc_channels_config(m_channels, NUM_SCAN_CH);
     if (ret != 0) {
         LOG_ERR("nrfx_saadc_channels_config failed (%d)", ret);
         return ret;
@@ -495,7 +513,7 @@ phase_current_t current_sense_get_phase_currents(void)
      * CSA). SOB and SOC are trustworthy, so phase A is recovered exactly from
      * Kirchhoff's current law Ia + Ib + Ic = 0 => Ia = -(Ib + Ic).
      *
-     * Only the good SOB/SOC shunts feed the offset-correction matrix, and the
+     * Only the good SOB/SOC shunts feed the offset-correction matrix from datasheet, and the
      * matrix's tiny A-cross-terms are DROPPED so a bad SOA reading can never
      * leak into B/C. The measured SOA value (ia_s) is therefore unused here. */
     (void)ia_s;
