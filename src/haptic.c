@@ -79,8 +79,8 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 /* Motor parameters */
 #define MOTOR_POLE_PAIRS 11     /* Number of pole pairs */
 #define MOTOR_PHASE_RESISTANCE 5.6f  /* Ohms */
-#define MOTOR_KV_RATING 320.0f  /* rpm/V */
-#define MOTOR_INDUCTANCE 0.0001f /* H */
+#define MOTOR_KV_RATING 141.0f  /* rpm/V */
+#define MOTOR_INDUCTANCE 0.0001f /* H */ // typical range: 0.1 - 10.0 mH, only needed for high-speed applications
 
 /* ---- Torque control mode ----
  * The haptic law below computes a torque command in the voltage domain
