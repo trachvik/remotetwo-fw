@@ -58,13 +58,16 @@ static void fault_isr(const struct device *dev, struct gpio_callback *cb,
  * the PWMPERIODEND event. Running NORMAL polarity first to capture clean
  * per-phase raw-voltage diagnostics.
  */
-#define PWM_LOWSIDE_SYNC 0
+#define PWM_LOWSIDE_SYNC 1
 
 static void write_duty_cycles(uint32_t period_ns, float dc_a, float dc_b, float dc_c)
 {
-    uint32_t pa = (uint32_t)(_CONSTRAIN(dc_a, 0.0f, 1.0f) * (float)period_ns);
-    uint32_t pb = (uint32_t)(_CONSTRAIN(dc_b, 0.0f, 1.0f) * (float)period_ns);
-    uint32_t pc = (uint32_t)(_CONSTRAIN(dc_c, 0.0f, 1.0f) * (float)period_ns);
+    /* Clamp away from 0 and 100%: with inverted polarity a 0% command becomes
+     * a 100% pulse which Zephyr treats as a constant GPIO level, stopping the
+     * PWM oscillator and killing the PWMPERIODEND event used for SAADC sync. */
+    uint32_t pa = (uint32_t)(_CONSTRAIN(dc_a, 0.001f, 0.999f) * (float)period_ns);
+    uint32_t pb = (uint32_t)(_CONSTRAIN(dc_b, 0.001f, 0.999f) * (float)period_ns);
+    uint32_t pc = (uint32_t)(_CONSTRAIN(dc_c, 0.001f, 0.999f) * (float)period_ns);
 
 #if PWM_LOWSIDE_SYNC
     /* Inverted polarity: active (LOW) pulse = period - pa at the start of the

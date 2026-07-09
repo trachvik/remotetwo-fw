@@ -59,12 +59,26 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
  */
 
 /* Fraction of the PWM period at which TIMER2.COMPARE[0] fires the SAADC sample.
- * This firmware uses CENTER-ALIGNED PWM (NRF_PWM_MODE_UP_AND_DOWN, COUNTERTOP=320).
- * In center-aligned mode the counter bottom (t=0) has NO simultaneous switching;
- * all low-side FETs are ON near t=0, giving a quiet CSA window from ~0 to ~8 us.
- * 0.1 places the sample at t=4 us (counter=64), well inside the quiet zone.
- * All three 3us conversions (SOA ~4us, SOB ~9us, SOC ~14us) complete before
- * any high-side switching event at moderate duty cycles. */
+ *
+ * The nRF PWM with NORMAL polarity (Zephyr default) generates:
+ *   HIGH from counter=0 to COMPARE  (high-side ON  -> shunt not in path -> CSA ~0)
+ *   LOW  from COMPARE to COUNTERTOP (low-side  ON  -> shunt carries current -> CSA valid)
+ * Sampling at 0.1 (counter=64) therefore always lands in the HIGH zone -> false zeros.
+ *
+ * FIX: bldc_driver_3pwm.c uses PWM_LOWSIDE_SYNC=1 which writes the pulse as
+ *   pwm_set(..., period - pa, PWM_POLARITY_INVERTED)
+ * With INVERTED polarity the bit-15 polarity flag in the sequence data is cleared,
+ * causing the nRF PWM hardware to output:
+ *   LOW  from counter=0 to (period-pa)/period * COUNTERTOP  (low-side ON  -> CSA valid)
+ *   HIGH from (period-pa)/period * COUNTERTOP to COUNTERTOP (high-side ON)
+ * The motor sees identical phase voltages (same high-side conduction time),
+ * but the quiet CSA window is now at the START of every period.
+ *
+ * PWMPERIODEND fires at counter=COUNTERTOP.  TIMER2 clears immediately.
+ * After 0.1 * period (= 4 us, counter=64) COMPARE0 fires -> SAADC SAMPLE.
+ * With dc < 0.9 (V_phase < 3.375 V) counter=64 is always inside the quiet
+ * window. All three acquisitions (SOA ~4us, SOB ~9us, SOC ~14us) complete
+ * well before any high-side transition for typical haptic voltages (<= 1.5 V). */
 #define ISENSE_SAMPLE_FRACTION 0.1f
 
 /* Phase-A reconstruction.
@@ -95,7 +109,7 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
 
 #define NUM_CH        3                       /* reported phase channels SOA,SOB,SOC */
 #define NUM_SCAN_CH   NUM_CH                  /* all three real channels */
-#define SCANS_PER_BUF 8
+#define SCANS_PER_BUF 100
 #define BUF_LEN       (NUM_SCAN_CH * SCANS_PER_BUF)
 
 /* Internal 0.6 V reference with gain 1/6 -> full-scale 3.6 V single-ended,
@@ -124,7 +138,7 @@ static float g_last_v[NUM_CH] = {0.0f, 0.0f, 0.0f};
 static float g_last_i[NUM_CH] = {0.0f, 0.0f, 0.0f};
 
 /* GPPI (DPPI on the nRF5340) connection handles. */
-static nrfx_gppi_handle_t h_clear;    /* PWM SEQSTARTED0 -> TIMER CLEAR  */
+static nrfx_gppi_handle_t h_clear;    /* PWM PWMPERIODEND -> TIMER CLEAR  */
 static nrfx_gppi_handle_t h_sample;   /* TIMER COMPARE0 -> SAADC SAMPLE */
 /* h_start removed: start_on_end=true lets nrfx handle START in software
  * after each END, ensuring EasyDMA buffer is programmed before START fires. */
@@ -307,15 +321,12 @@ int current_sense_init(void)
     /* Bring up TIMER2 + program its centre-of-period compare. */
     isense_timer_dppi_setup();
 
-    /* DPPI ch A: PWM0 SEQSTARTED0 -> TIMER2 CLEAR (re-zero the timer at the
-     * start of every one-shot playback so COMPARE0 stays aligned to the quiet
-     * zone at counter=0).
-     *
-     * With LOOP=0 (one-shot) + explicit SEQSTART[0] in write_duty_cycles(),
-     * SEQSTARTED0 fires every ~1 ms (each haptic tick).  TIMER2 COMPARE0@64
-     * fires 4 µs after each reset = quiet zone (all low-sides ON) for the
-     * SAADC scan.  LOOPSDONE is never generated with LOOP=0. */
-    uint32_t pwm_evt    = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0);
+    /* DPPI ch A: PWM0 PWMPERIODEND -> TIMER2 CLEAR
+     * PWMPERIODEND fires every 40 us (25 kHz) when the counter reaches COUNTERTOP.
+     * This hardware-locked event resets TIMER2.  COMPARE0 fires 0.1*period = 4 us
+     * later at counter=64, which is inside the low-side quiet window for all
+     * typical haptic duty cycles (dc < 0.9 with PWM_LOWSIDE_SYNC=1). */
+    uint32_t pwm_evt    = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
     uint32_t tmr_clear  = nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR);
     ret = nrfx_gppi_conn_alloc(pwm_evt, tmr_clear, &h_clear);
     if (ret != 0) {
@@ -338,19 +349,19 @@ int current_sense_init(void)
 
     /* ---- DPPI diagnostic dump ---- */
     {
-        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0) + 0x80U));
+        uint32_t pub_pwm  = *((volatile uint32_t *)(nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND) + 0x80U));
         uint32_t sub_tmr  = *((volatile uint32_t *)(nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR) + 0x80U));
         uint32_t pub_tmr  = *((volatile uint32_t *)(nrf_timer_event_address_get(ISENSE_TIMER, NRF_TIMER_EVENT_COMPARE0) + 0x80U));
         uint32_t sub_saad = *((volatile uint32_t *)(nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE) + 0x80U));
         LOG_INF("DPPI alloc: h_clear=%d h_sample=%d CHEN=0x%08x",
                 (int)h_clear, (int)h_sample, NRF_DPPIC->CHEN);
-        LOG_INF("DPPI regs: PUB_PWMSEQSTART=0x%08x SUB_TMRCLEAR=0x%08x",
+        LOG_INF("DPPI regs: PUB_PWMPERIODEND=0x%08x SUB_TMRCLEAR=0x%08x",
                 pub_pwm, sub_tmr);
         LOG_INF("DPPI regs: PUB_TMRCMP0=0x%08x SUB_SAADCSMP=0x%08x",
                 pub_tmr, sub_saad);
-        /* Verify TIMER2 is being cleared by SEQSTARTED0 via h_clear.
+        /* Verify TIMER2 is being cleared by PWMPERIODEND via h_clear.
          * Two captures 100 us apart: if h_clear works both reads are <640 (one
-         * PWM period); if h_clear is broken the counter grows freely. */
+         * 25 kHz period = 640 ticks at 16 MHz); if broken counter grows freely. */
         nrf_timer_task_trigger(ISENSE_TIMER, NRF_TIMER_TASK_CAPTURE2);
         uint32_t tc0 = nrf_timer_cc_get(ISENSE_TIMER, NRF_TIMER_CC_CHANNEL2);
         k_busy_wait(100U);
@@ -359,14 +370,13 @@ int current_sense_init(void)
         LOG_INF("TIMER2 cnt: t0=%u t1=%u diff=%d (h_clear OK if diff<640)",
                 tc0, tc1, (int)(tc1 - tc0));
 
-        /* Check if SEQSTARTED0 actually fires. Clear, trigger a SEQSTART (via
-         * a dummy write_duty_cycles call would be ideal, but here just wait
-         * >1 ms for the haptic loop to fire one), read the event register. */
-        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0);
-        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_SEQSTARTED0);
+        /* Check that PWMPERIODEND actually fires: clear, wait 150 us (4 periods),
+         * then read back. fired=1 confirms the DPPI sync source is working. */
+        uint32_t pwm_evt_addr = nrf_pwm_event_address_get(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
+        nrf_pwm_event_clear(NRF_PWM0, NRF_PWM_EVENT_PWMPERIODEND);
         k_busy_wait(150U);
         uint32_t pwm_evt_fired = *((volatile uint32_t *)pwm_evt_addr);
-        LOG_INF("SEQSTARTED0: addr=0x%08x fired=%u (1=h_clear source OK, 0=no playback yet)",
+        LOG_INF("PWMPERIODEND: addr=0x%08x fired=%u (1=sync OK; 0=PWM stopped/not started)",
                 pwm_evt_addr, pwm_evt_fired);
         LOG_INF("Periph addrs: NRF_PWM0=%p NRF_TIMER2=%p NRF_DPPIC=%p",
                 (void *)NRF_PWM0, (void *)ISENSE_TIMER, (void *)NRF_DPPIC);
@@ -465,14 +475,11 @@ phase_current_t current_sense_get_phase_currents(void)
         return c;
     }
 
-    /* SW fallback: trigger one SAADC SAMPLE on every call so the scan pipeline
-     * keeps running even when DPPI h_sample is not firing (h_clear broken
-     * -> TIMER2 free-runs at 32-bit period ~268 s, so h_sample fires only once
-     * after init).  This call comes from the 1 kHz haptic loop, so the
-     * effective trigger rate is 1 kHz -> 125 DONE events/s with SCANS_PER_BUF=8. */
-    if (g_armed) {
-        nrf_saadc_task_trigger(NRF_SAADC, NRF_SAADC_TASK_SAMPLE);
-    }
+    /* No SW SAMPLE here. PWMPERIODEND drives TIMER2 at 25 kHz; the DPPI
+     * chain fires SAADC SAMPLE every 40 us at a phase-locked counter=64.
+     * A 1 kHz SW trigger at a random PWM phase would land in the HIGH zone
+     * ~50-90% of the time (counter 0..compare), injecting near-zero readings
+     * and causing the false-zero drops seen in earlier firmware versions. */
 
     float v[NUM_CH];
     isense_read_volts(v);
