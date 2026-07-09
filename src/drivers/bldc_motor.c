@@ -650,7 +650,7 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
  * FOC loop - SimpleFOC style
  * Update sensor and electrical angle, then apply the voltages calculated in move()
  */
-void bldc_motor_loop_foc(bldc_motor_t *motor)
+void bldc_motor_loop_foc(bldc_motor_t *motor) // TO DO - anticogging conpensation
 {
     if (motor == NULL) return;
     
