@@ -457,7 +457,7 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
                    HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&haptic_thread_data, "haptic_foc");
     k_timer_start(&haptic_timer, K_USEC(1000000U / HAPTIC_LOOP_HZ),
-                                  K_USEC(1000000U / HAPTIC_LOOP_HZ));  /* 5 kHz = 200 µs */
+                                  K_USEC(1000000U / HAPTIC_LOOP_HZ));  /* 5 kHz = 200 µs */ // up to 10 kHz?
 
     return 0;
 }
@@ -783,18 +783,17 @@ void haptic_loop(bldc_motor_t *motor)
 #if HAPTIC_CURRENT_SENSE_TELEMETRY && !HAPTIC_USE_CURRENT_CONTROL
     /* Voltage-mode torque keeps the correct haptic feel; we still sample the
      * phase currents purely for the SerialPlot "DATA:ia,ib,ic" [mA] stream.
-     * loop_foc() does NOT read the SAADC in VOLTAGE mode, so trigger a fresh
-     * read here. Phase A is reconstructed as -(Ib+Ic) inside current_sense. */
+     * Print at a fixed 1 kHz rate (every HAPTIC_LOOP_HZ/1000 loop iterations)
+     * so SerialPlot has enough points per electrical cycle (~30-45 at typical
+     * haptic speeds of 2-3 Hz mechanical × 11 pole pairs) to show smooth
+     * sine waves.  The SAADC DONE rate is ~250 Hz; gating on that gives only
+     * 7-11 points/cycle which looks blocky/triangular. */
     {
         if (current_sense_is_ready()) {
-            /* Call get_phase_currents() every tick (not gated on sc) so the
-             * SW SAMPLE fallback inside it fires at 1 kHz and the SAADC
-             * never stalls when DPPI h_sample is not running. */
             phase_current_t pc = current_sense_get_phase_currents();
-            static uint32_t last_sc = 0;
-            uint32_t sc = current_sense_get_scan_count();
-            if (sc != last_sc) {
-                last_sc = sc;
+            static uint32_t print_count = 0;
+            if (++print_count >= (HAPTIC_LOOP_HZ / 1000U)) {
+                print_count = 0;
                 printk("DATA:%d,%d,%d\n",
                        (int)(pc.a * 1000.0f),
                        (int)(pc.b * 1000.0f),

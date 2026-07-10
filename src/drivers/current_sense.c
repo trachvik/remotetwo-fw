@@ -118,7 +118,7 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
 
 #define NUM_CH        3                       /* reported phase channels SOA,SOB,SOC */
 #define NUM_SCAN_CH   2                       /* SOB + SOC only; SOA reconstructed */
-#define SCANS_PER_BUF 100
+#define SCANS_PER_BUF 20
 #define BUF_LEN       (NUM_SCAN_CH * SCANS_PER_BUF)
 
 /* Internal 0.6 V reference with gain 1/6 -> full-scale 3.6 V single-ended,
@@ -147,9 +147,11 @@ static float g_last_v[NUM_CH] = {0.0f, 0.0f, 0.0f};
 static float g_last_i[NUM_CH] = {0.0f, 0.0f, 0.0f};
 
 /* GPPI (DPPI on the nRF5340) connection handles. */
-static nrfx_gppi_handle_t h_clear;    /* PWM PWMPERIODEND -> TIMER CLEAR              */
-static nrfx_gppi_handle_t h_sample;   /* TIMER COMPARE0  -> SAADC SAMPLE             */
-static nrfx_gppi_handle_t h_start;    /* SAADC END       -> SAADC START (hw re-arm)  */
+static nrfx_gppi_handle_t       h_clear;       /* PWM PWMPERIODEND -> TIMER CLEAR            */
+static nrfx_gppi_handle_t       h_sample;      /* TIMER COMPARE0  -> SAADC SAMPLE (gated)   */
+static nrfx_gppi_handle_t       h_dis;         /* SAADC END       -> group DIS (gate closed) */
+static nrfx_gppi_handle_t       h_en;          /* SAADC STARTED   -> group EN  (gate open)  */
+static nrfx_gppi_group_handle_t g_sample_grp;  /* DPPI group controlling h_sample enable     */
 static volatile bool      g_armed = false;
 static volatile uint32_t  g_buf_req_count = 0;
 
@@ -190,32 +192,28 @@ static void saadc_handler(nrfx_saadc_evt_t const *p_event)
     case NRFX_SAADC_EVT_DONE: {
         nrf_saadc_value_t *b = p_event->data.done.p_buffer;
         uint16_t n = p_event->data.done.size;
-        /* Average all complete 2-channel scans in the buffer.
+        /* Use the LAST complete scan in the buffer (not an average).
          *
-         * Hardware invariant (nRF5340 SAADC): the peripheral always writes
-         * ch0 first in every scan and stores results sequentially from
-         * buffer offset 0.  Therefore:
-         *   even positions 0, 2, 4, ... are ALWAYS ch0 = SOC (AIN5/P0.26)
-         *   odd  positions 1, 3, 5, ... are ALWAYS ch1 = SOB (AIN4/P0.25)
-         * regardless of the value of n.
+         * Averaging all 100 scans over the 4ms buffer window would
+         * smear the signal over 4ms.  At haptic oscillation frequencies
+         * (50-200 Hz electrical = 5-18 Hz mechanical × 11 pole pairs),
+         * a 4ms average covers 0.2-0.8 electrical cycles and reduces
+         * signal amplitude by sinc(π·cycles): at 100 Hz -24%, at 200 Hz
+         * -77%, at 220 Hz -96%.  Practically this kills the current
+         * feedback needed for FOC and makes SerialPlot show near-zero.
          *
-         * Why averaging instead of just b[n-2]/b[n-1]:
-         * If a spurious SAADC_STOPPED fires and n becomes odd,
-         * b[n-2] would be at an ODD position (ch1=SOB) and get assigned
-         * to g_raw[2] (SOC slot), causing a persistent B/C swap until the
-         * next restart.  Averaging over all complete pairs avoids this
-         * entirely: even positions always give SOC, odd always SOB.
-         * As a bonus, averaging SCANS_PER_BUF=100 samples reduces ADC
-         * noise by sqrt(100) = 10x. */
+         * Using only the last complete scan gives the INSTANTANEOUS
+         * current at the most recent PWM quiet window.
+         *
+         * B/C swap protection: `(n / NUM_SCAN_CH - 1) * NUM_SCAN_CH`
+         * rounds down to the last COMPLETE pair.  Even if n is odd
+         * (STOPPED fired early), `last` is always even-aligned so
+         * ch0=SOC lands at an even offset and ch1=SOB at odd — no swap. */
         uint16_t scans = n / NUM_SCAN_CH;
         if (scans > 0) {
-            int32_t sum_c = 0, sum_b = 0;
-            for (uint16_t i = 0; i < scans * NUM_SCAN_CH; i += NUM_SCAN_CH) {
-                sum_c += b[i];         /* ch0 = SOC, always at even offsets */
-                sum_b += b[i + 1];     /* ch1 = SOB, always at odd  offsets */
-            }
-            g_raw[2] = (int16_t)(sum_c / (int32_t)scans);
-            g_raw[1] = (int16_t)(sum_b / (int32_t)scans);
+            uint16_t last = (uint16_t)((scans - 1u) * (uint16_t)NUM_SCAN_CH);
+            g_raw[2] = b[last];       /* SOC - ch0, always at even offset */
+            g_raw[1] = b[last + 1];   /* SOB - ch1, always at odd offset  */
             g_scan_count++;
         }
         break;
@@ -339,15 +337,12 @@ int current_sense_init(void)
     uint32_t ch_mask = nrfx_saadc_channels_configured_get();
 
     nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
-    /* start_on_end=false: START is fired by DPPI h_start (SAADC END -> SAADC START)
-     * in hardware at zero CPU latency.  With start_on_end=true a ~10-20 µs software
-     * gap existed between END and the software-issued START.  If a DPPI SAMPLE tick
-     * arrived in that gap the SAADC internal channel MUX shifted by one, causing a
-     * persistent B/C phase swap for the entire next buffer until the next restart.
-     * nrfx_saadc pre-programs RESULT.PTR via nrfx_saadc_buffer_set() in the BUF_REQ
-     * callback (before END fires), so the hardware START always latches the correct
-     * next-buffer pointer without any software involvement. */
-    adv.start_on_end = false;
+    /* start_on_end=true: nrfx writes RESULT.PTR then fires START as an atomic pair
+     * inside saadc_event_end_handle via nrfy_saadc_buffer_latch(p_reg, false).
+     * This guarantees the correct buffer address is latched at START.
+     * The race window (SAADC stopped between END and START) is eliminated by
+     * the DPPI group gating on h_sample below — not by deferring START. */
+    adv.start_on_end = true;
 
     ret = nrfx_saadc_advanced_mode_set(ch_mask, NRF_SAADC_RESOLUTION_12BIT,
                                        &adv, saadc_handler);
@@ -389,17 +384,49 @@ int current_sense_init(void)
         return ret;
     }
 
-    /* DPPI ch C: SAADC END -> SAADC START (hardware zero-latency re-arm).
-     * Fires START at the exact END event, before any IRQ handler runs, so SAADC
-     * is never in a stopped state when the next SAMPLE tick arrives from TIMER2. */
-    uint32_t saadc_end_evt  = nrf_saadc_event_address_get(NRF_SAADC, NRF_SAADC_EVENT_END);
-    uint32_t saadc_start_tsk = nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_START);
-    ret = nrfx_gppi_conn_alloc(saadc_end_evt, saadc_start_tsk, &h_start);
-    if (ret != 0) {
-        LOG_ERR("GPPI start conn alloc failed (%d)", ret);
-        return ret;
+    /* DPPI group gating for h_sample: prevents SAMPLE from reaching a stopped SAADC.
+     *
+     * Root cause of B/C channel swap: between hardware EVENTS_END and the software
+     * START issued by nrfy_saadc_buffer_latch() (~10-20 µs IRQ latency, potentially
+     * 50-100 µs with BLE), the SAADC is stopped.  Any TIMER COMPARE0 → SAADC SAMPLE
+     * trigger arriving in this window shifts the internal channel MUX by one, swapping
+     * ch0 (SOC) and ch1 (SOB) for the ENTIRE next buffer.
+     *
+     * Fix: gate h_sample with a DPPI group.
+     *   EVENTS_END    → h_dis → group DIS → CHEN[h_sample] = 0  (hardware, 0 cycles)
+     *   EVENTS_STARTED → h_en → group EN  → CHEN[h_sample] = 1  (hardware, 0 cycles)
+     * STARTED fires immediately after START (issued by nrfy_saadc_buffer_latch), so
+     * SAMPLE is re-enabled the instant the SAADC is running again. */
+    {
+        uint32_t domain_id = nrfx_gppi_domain_id_get(
+            nrf_saadc_event_address_get(NRF_SAADC, NRF_SAADC_EVENT_END));
+        ret = nrfx_gppi_group_alloc(domain_id, &g_sample_grp);
+        if (ret != 0) {
+            LOG_ERR("GPPI group alloc failed (%d)", ret);
+            return ret;
+        }
+        nrfx_gppi_group_ch_add(g_sample_grp, (uint32_t)h_sample);
+
+        /* h_dis: SAADC END -> group DIS (close gate at END, hardware, 0 latency) */
+        uint32_t saadc_end_evt     = nrf_saadc_event_address_get(NRF_SAADC, NRF_SAADC_EVENT_END);
+        uint32_t grp_dis_task      = nrfx_gppi_group_task_dis_addr(g_sample_grp);
+        ret = nrfx_gppi_conn_alloc(saadc_end_evt, grp_dis_task, &h_dis);
+        if (ret != 0) {
+            LOG_ERR("GPPI h_dis alloc failed (%d)", ret);
+            return ret;
+        }
+        nrfx_gppi_conn_enable(h_dis);
+
+        /* h_en: SAADC STARTED -> group EN (re-open gate when SAADC is running again) */
+        uint32_t saadc_started_evt = nrf_saadc_event_address_get(NRF_SAADC, NRF_SAADC_EVENT_STARTED);
+        uint32_t grp_en_task       = nrfx_gppi_group_task_en_addr(g_sample_grp);
+        ret = nrfx_gppi_conn_alloc(saadc_started_evt, grp_en_task, &h_en);
+        if (ret != 0) {
+            LOG_ERR("GPPI h_en alloc failed (%d)", ret);
+            return ret;
+        }
+        nrfx_gppi_conn_enable(h_en);
     }
-    nrfx_gppi_conn_enable(h_start);
 
     /* ---- DPPI diagnostic dump ---- */
     {
@@ -407,8 +434,9 @@ int current_sense_init(void)
         uint32_t sub_tmr  = *((volatile uint32_t *)(nrf_timer_task_address_get(ISENSE_TIMER, NRF_TIMER_TASK_CLEAR) + 0x80U));
         uint32_t pub_tmr  = *((volatile uint32_t *)(nrf_timer_event_address_get(ISENSE_TIMER, NRF_TIMER_EVENT_COMPARE0) + 0x80U));
         uint32_t sub_saad = *((volatile uint32_t *)(nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE) + 0x80U));
-        LOG_INF("DPPI alloc: h_clear=%d h_sample=%d h_start=%d CHEN=0x%08x",
-                (int)h_clear, (int)h_sample, (int)h_start, NRF_DPPIC->CHEN);
+        LOG_INF("DPPI alloc: h_clear=%d h_sample=%d h_dis=%d h_en=%d grp=%d CHEN=0x%08x",
+                (int)h_clear, (int)h_sample, (int)h_dis, (int)h_en,
+                (int)g_sample_grp, NRF_DPPIC->CHEN);
         LOG_INF("DPPI regs: PUB_PWMPERIODEND=0x%08x SUB_TMRCLEAR=0x%08x",
                 pub_pwm, sub_tmr);
         LOG_INF("DPPI regs: PUB_TMRCMP0=0x%08x SUB_SAADCSMP=0x%08x",

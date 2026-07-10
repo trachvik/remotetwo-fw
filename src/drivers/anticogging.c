@@ -23,6 +23,15 @@ extern float foc_get_mechanical_angle(void);
 extern float foc_get_pi_iq_output(void); // WARNING: Must return only the pure effort of the velocity PI controller!
 extern void foc_loop_step(void);
 
+// Helper function to spin the motor at a given speed indefinitely (for testing)
+void spin_motor_forever(float speed_rad_s) {
+    foc_set_velocity_target(speed_rad_s);
+    while (1) {
+        foc_loop_step();
+        k_busy_wait(200); // 200 µs for 5 kHz loop
+    }
+}
+
 // Helper function remains mostly the same, just uses foc_get_pi_iq_output
 static void run_directional_calibration(float speed, float *output_lut) 
 {
@@ -34,7 +43,7 @@ static void run_directional_calibration(float speed, float *output_lut)
         temp_count[i] = 0;
     }
 
-    // motor.controller = MotionControlType::velocity_openloop; | SimpleFOC
+    // in closed-loop velocity current mode
     foc_set_velocity_target(speed);
 
     // Stabilization
