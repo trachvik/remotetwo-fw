@@ -16,13 +16,16 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define HAPTIC_OUTPUT_GAIN 2.0f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
 
-/* Voltage-control haptic tuning (loop rate: 1 kHz = K_MSEC(1)).
- * Velocity LPF alpha = 0.1  at 1 kHz -> about 16 Hz bandwidth (detent, fast response).
- * Velocity LPF alpha = 0.01 at 1 kHz -> about 1.6 Hz bandwidth (smooth mode, avoids zero crossing between encoder ticks).
- * At 0.5 rad/s the encoder fires about every 77 ms; alpha=0.01 keeps velocity from decaying to zero between ticks.
+/* Voltage-control haptic tuning (loop rate: HAPTIC_LOOP_HZ = 5 kHz).
+ * All IIR alpha values are scaled for 5 kHz (alpha_5k = alpha_1k / 5) to preserve
+ * the same cutoff frequencies as the original 1 kHz design.
+ * Velocity is d_ang * HAPTIC_LOOP_HZ [rad/s].  Encoder quantisation noise rises
+ * proportionally with sample rate, but the narrower-bandwidth filters (same cutoff
+ * via smaller alpha) keep the filtered output noise at the same level as at 1 kHz.
  */
+#define HAPTIC_LOOP_HZ      5000U   /* FOC / haptic loop rate [Hz]; period = 200 µs */
 #define SMOOTH_KV           0.3f    /* V*s/rad velocity damping in smooth mode */
-#define SMOOTH_VEL_ALPHA    0.03f   /* velocity IIR alpha for smooth mode, tau about 33 ms */
+#define SMOOTH_VEL_ALPHA    0.006f  /* velocity IIR alpha for smooth mode @ 5 kHz, tau ~33 ms (= 0.03/5) */
 #define SMOOTH_VEL_THRESH   0.05f   /* rad/s threshold below which motor freewheels */
 #define SMOOTH_NAV_STEP_ANGLE_RAD 0.06f /* fine virtual navigation step in smooth mode */
 #define SMOOTH_VDETENT_STEPS 16
@@ -46,17 +49,16 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define DETENT_KV           0.12f   /* V*s/rad velocity damping in detent mode. Moderate: enough to
                                      * stop the spring ringing, low enough that encoder velocity
                                      * noise does not become audible torque ripple. */
-#define VEL_LPF_ALPHA       0.15f   /* fast velocity IIR in detent mode, ~25 Hz BW.
-                                     * Balance: enough smoothing to keep the differentiated-encoder
-                                     * velocity quiet, little enough phase lag that damping does not
-                                     * lag the motion and re-excite a limit cycle. */
-#define SMOOTH_IIR_ALPHA    0.1f    /* output IIR at 1 kHz, tau about 10 ms */
-#define DETENT_IIR_ALPHA    0.16f   /* output IIR on the SPRING force in detent mode, ~28 Hz.
-                                     * Lowered from 0.22f: the steep detent spring slope amplifies
-                                     * encoder noise into audible "robotic" torque ripple; smoothing
-                                     * the spring force harder removes that ripple. Damping is added
-                                     * AFTER this filter (stays fast) so detents do not ring.
-                                     * Raise toward 0.22f if the detent snap feels too soft. */
+#define VEL_LPF_ALPHA       0.030f  /* fast velocity IIR in detent mode, ~25 Hz BW @ 5 kHz
+                                     * (= 0.15/5).  Balance: enough smoothing to keep the
+                                     * differentiated-encoder velocity quiet, little enough phase
+                                     * lag that damping does not re-excite a limit cycle. */
+#define SMOOTH_IIR_ALPHA    0.020f  /* output IIR at 5 kHz, tau ~10 ms (= 0.1/5) */
+#define DETENT_IIR_ALPHA    0.032f  /* output IIR on the SPRING force in detent mode, ~28 Hz @ 5 kHz
+                                     * (= 0.16/5).  Scaled from 0.16f @1 kHz: the steep spring slope
+                                     * amplifies encoder noise into audible torque ripple; this filter
+                                     * removes it.  Damping is added AFTER so it stays fast.
+                                     * Raise toward 0.044f (= 0.22f @1 kHz) if detents feel too soft. */
 #define DETENT_VEL_DB       0.10f   /* rad/s soft-deadband scale for the damping velocity. NOT a
                                      * hard cutoff: a hard deadband toggled damping on/off as the
                                      * velocity crossed the threshold, which produced the "robotic"
@@ -64,7 +66,7 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
                                      * v_eff = v*v^2/(v^2+DB^2) tapers small (noise) velocity
                                      * smoothly to zero with NO discontinuity, so there is nothing
                                      * to step or chatter. */
-#define DETENT_SPRING_POS_ALPHA 0.15f /* 1-pole LPF (~30 Hz @1kHz) on the position used ONLY for
+#define DETENT_SPRING_POS_ALPHA 0.030f /* 1-pole LPF (~30 Hz @5kHz, = 0.15/5) on the position used ONLY for
                                        * the spring force. This is the PRIMARY robotic-sound fix:
                                        * the steep spring slope (AMP*2pi/step_size) multiplies any
                                        * position noise into force noise, worse with more steps, so
@@ -210,10 +212,15 @@ int haptic_update_num_steps_from_button(void)
 {
     static bool initialized = false;
     static bool last_pressed = false;
+    static bool fired = false;          /* guard: one event per physical press */
+    static int64_t press_start_ms = 0;  /* when current press began            */
     static int current_num_steps = 0;
     static int64_t last_change_ms = 0;
 
     if (!initialized) {
+        /* Sync with any externally-set step count so cycling starts correctly.
+         * (haptic_init() may call haptic_set_num_steps() before first poll.) */
+        current_num_steps = g_num_steps_current;
         if (user_button.port != NULL && gpio_is_ready_dt(&user_button)) {
             gpio_pin_configure_dt(&user_button, GPIO_INPUT);
             int init_state = gpio_pin_get_dt(&user_button);
@@ -230,7 +237,21 @@ int haptic_update_num_steps_from_button(void)
     bool pressed = gpio_pin_get_dt(&user_button) > 0;
     int64_t now_ms = k_uptime_get();
 
-    if (pressed && !last_pressed && (now_ms - last_change_ms) > 180) {
+    if (pressed && !last_pressed) {
+        /* Rising edge: re-sync internal counter with whatever external code
+         * (remote_control haptic mode menu) may have set via haptic_set_num_steps(),
+         * reset the hold timer, and clear the one-shot guard. */
+        current_num_steps = g_num_steps_current;
+        press_start_ms = now_ms;
+        fired = false;
+    }
+
+    /* Require button held >= 30 ms before counting as a press.
+     * Motor PWM EMI spikes on the GPIO last < 1 ms; real button presses > 80 ms.
+     * The 30 ms threshold eliminates false triggers without adding perceptible lag. */
+    if (pressed && !fired
+            && (now_ms - press_start_ms) >= 30
+            && (now_ms - last_change_ms) >= 180) {
         /* Cycle: 0 -> 16 -> 12 -> 8 -> 0 -> 16 ... */
         if (current_num_steps == 0) {
             current_num_steps = 16;
@@ -240,7 +261,12 @@ int haptic_update_num_steps_from_button(void)
             current_num_steps -= 4;
         }
         last_change_ms = now_ms;
-        LOG_INF("Steps: %d", current_num_steps);
+        fired = true;
+        /* Clear any external override so the physical button always wins.
+         * Without this, haptic_set_num_steps(0) from the virtual-click mode
+         * menu permanently overrides the button via g_num_steps_override. */
+        g_num_steps_override = -1;
+        LOG_INF("Steps: %d (button)", current_num_steps);
     }
 
     last_pressed = pressed;
@@ -430,7 +456,8 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
                    haptic_thread_fn, NULL, NULL, NULL,
                    HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&haptic_thread_data, "haptic_foc");
-    k_timer_start(&haptic_timer, K_MSEC(1), K_MSEC(1));  /* 1 kHz, matches reference */
+    k_timer_start(&haptic_timer, K_USEC(1000000U / HAPTIC_LOOP_HZ),
+                                  K_USEC(1000000U / HAPTIC_LOOP_HZ));  /* 5 kHz = 200 µs */
 
     return 0;
 }
@@ -471,9 +498,9 @@ void haptic_loop(bldc_motor_t *motor)
     while (d_ang < -_2PI * 0.5f) d_ang += _2PI;
     haptic_prev_angle = current_angle;
     /* Fast estimate for detent mode (16 Hz BW) */
-    haptic_inst_vel = VEL_LPF_ALPHA * (d_ang * 1000.0f) + (1.0f - VEL_LPF_ALPHA) * haptic_inst_vel;
+    haptic_inst_vel = VEL_LPF_ALPHA * (d_ang * (float)HAPTIC_LOOP_HZ) + (1.0f - VEL_LPF_ALPHA) * haptic_inst_vel;
     /* Slow estimate for smooth mode (~1.6 Hz BW), stays non-zero between encoder ticks. */
-    smooth_vel = SMOOTH_VEL_ALPHA * (d_ang * 1000.0f) + (1.0f - SMOOTH_VEL_ALPHA) * smooth_vel;
+    smooth_vel = SMOOTH_VEL_ALPHA * (d_ang * (float)HAPTIC_LOOP_HZ) + (1.0f - SMOOTH_VEL_ALPHA) * smooth_vel;
     cumulative_angle += d_ang;
 
     /* Preserve position when num_steps changes; reset IIR filters on transition */

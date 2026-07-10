@@ -95,6 +95,7 @@ static bool              g_light_on = false;
 static int               g_smooth_nav_accum = 0;
 static haptic_mode_menu_state_t g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
 static haptic_mode_item_t g_haptic_mode_sel = HAPTIC_MODE_SMOOTH;
+static int64_t g_haptic_mode_menu_open_ms = 0; /* wall-clock ms when mode menu was last opened */
 static struct k_work_delayable g_click_eval_work;
 static int g_pending_click_dir = 0;
 /* UI updates are prepared by callbacks but pushed to display only from
@@ -102,7 +103,7 @@ static int g_pending_click_dir = 0;
 static atomic_t g_menu_refresh_pending = ATOMIC_INIT(0);
 static atomic_t g_status_mode_pending  = ATOMIC_INIT(0);
 
-#define DOUBLE_CLICK_WINDOW_MS  500
+#define DOUBLE_CLICK_WINDOW_MS  200
 #define SMOOTH_MENU_STEP_DIV    3
 #define DISPLAY_IDLE_TIMEOUT_MS 20000
 
@@ -1292,6 +1293,7 @@ static void on_virtual_click(int dir)
         g_pending_click_dir = 0;
         g_haptic_mode_menu = HAPTIC_MODE_MENU_VISIBLE;
         g_haptic_mode_sel = haptic_mode_steps_to_item(haptic_get_num_steps());
+        g_haptic_mode_menu_open_ms = k_uptime_get();
         log_menu_state("mode menu open (double click)");
         return;
     }
@@ -1405,6 +1407,15 @@ void remote_control_tick(void)
 {
     hotkey_gpio_poll();
     power_button_poll();
+
+    /* Auto-dismiss haptic mode menu if no confirmation within 3 s.
+     * Prevents the menu from being stuck open and accidentally capturing
+     * rotation or virtual clicks into a mode change. */
+    if (g_haptic_mode_menu == HAPTIC_MODE_MENU_VISIBLE &&
+            (k_uptime_get() - g_haptic_mode_menu_open_ms) >= 3000) {
+        g_haptic_mode_menu = HAPTIC_MODE_MENU_HIDDEN;
+        LOG_INF("Haptic mode menu auto-dismissed (timeout)");
+    }
 
     if (atomic_cas(&g_status_mode_pending, 1, 0)) {
         ui_display_set_mode(UI_DISP_STATUS);
