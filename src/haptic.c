@@ -91,13 +91,12 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
  * Ki = MOTOR_PHASE_RESISTANCE * 2π * BW_HZ
  * These are computed and applied by bldc_motor_configure_current_loop() at init.
  *
- * BW_HZ: closed-loop bandwidth in Hz.  Rule of thumb: 3-10% of HAPTIC_LOOP_HZ.
- *   At 5 kHz loop: 3% = 150 Hz → Kp ≈ 0.094 V/A, Ki ≈ 5278 V/(A·s).
- * LPF_CUTOFF_HZ: noise filter on measured Iq/Id before the PI.
- *   Start at 500 Hz; decrease to 200-300 Hz if motor buzzes after enabling
- *   current control (the LPF is the primary "anti-hiss" knob). */
-#define HAPTIC_CURRENT_LOOP_BW_HZ    150.0f  /* Hz; 3% of HAPTIC_LOOP_HZ */
-#define HAPTIC_CURRENT_LPF_CUTOFF_HZ 500.0f  /* Hz; lower → quieter but slower */
+ * Conservative "stable-first" start for this hardware:
+ * - Lower BW reduces PI aggressiveness and idle current chatter.
+ * - LPF cutoff close to BW attenuates ADC noise before integrator.
+ * If stable, raise BW in small steps (50 -> 70 -> 100 Hz). */
+#define HAPTIC_CURRENT_LOOP_BW_HZ     50.0f  /* Hz; stability-first baseline */
+#define HAPTIC_CURRENT_LPF_CUTOFF_HZ 120.0f  /* Hz; stronger noise rejection */
 
 /* ---- Torque control mode ----
  * The haptic law below computes a torque command in the voltage domain
@@ -117,7 +116,7 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 #define HAPTIC_USE_CURRENT_CONTROL 1
 #define HAPTIC_CURRENT_SENSE_TELEMETRY 1
 #define HAPTIC_VOLT_TO_AMP   (1.0f / MOTOR_PHASE_RESISTANCE) /* V-domain torque -> A setpoint */
-#define HAPTIC_CURRENT_LIMIT 0.6f   /* A, hard clamp on the q-current setpoint */
+#define HAPTIC_CURRENT_LIMIT 0.25f  /* A, hard clamp on q-current setpoint for safe bring-up */
 
 /* Prefer btn_south, keep compatibility with older overlays and board buttons. */
 #if DT_NODE_EXISTS(DT_NODELABEL(btn_south))
@@ -410,24 +409,25 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
      * If the SAADC fails to come up we deliberately do NOT silently revert to
      * voltage control: the FOC loop emits a loud per-second warning so a broken
      * current loop can never masquerade as working. */
-    /* Current PID outputs a voltage, so clamp it to the supply voltage limit. */
-    motor->pid_current_q.limit = motor->voltage_limit;
-    motor->pid_current_d.limit = motor->voltage_limit;
-    motor->current_limit = HAPTIC_CURRENT_LIMIT;
-    motor->torque_controller = FOC_CURRENT;
-
-    /* Compute PI gains and LPF cutoff from motor params + bandwidth formula.
-     * Kp = L·ωc, Ki = R·ωc, ωc = 2π·BW_HZ  (SimpleFOC IMC / bandwidth method).
-     * Fixed Ts = 1/HAPTIC_LOOP_HZ eliminates micros() jitter in the PI. */
-    bldc_motor_configure_current_loop(motor,
-                                      HAPTIC_CURRENT_LOOP_BW_HZ,
-                                      (float)HAPTIC_LOOP_HZ,
-                                      HAPTIC_CURRENT_LPF_CUTOFF_HZ);
-
     if (cs_ok) {
+        /* Current PID outputs a voltage, so clamp it to the supply voltage limit. */
+        motor->pid_current_q.limit = motor->voltage_limit;
+        motor->pid_current_d.limit = motor->voltage_limit;
+        motor->current_limit = HAPTIC_CURRENT_LIMIT;
+
+        /* Compute PI gains and LPF cutoff from motor params + bandwidth formula.
+         * Kp = L·ωc, Ki = R·ωc, ωc = 2π·BW_HZ  (SimpleFOC IMC / bandwidth method).
+         * Fixed Ts = 1/HAPTIC_LOOP_HZ eliminates micros() jitter in the PI. */
+        bldc_motor_configure_current_loop(motor,
+                                          HAPTIC_CURRENT_LOOP_BW_HZ,
+                                          (float)HAPTIC_LOOP_HZ,
+                                          HAPTIC_CURRENT_LPF_CUTOFF_HZ);
+
         /* Find current-sense polarity vs the driver so the q-current PID does
          * not run away. */
         bldc_motor_align_current_sense(motor);
+
+        motor->torque_controller = FOC_CURRENT;
 
         float oa = 0.0f, ob = 0.0f, oc = 0.0f;
         current_sense_get_offsets(&oa, &ob, &oc);
@@ -435,7 +435,8 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
                 (double)oa, (double)ob, (double)oc, (double)current_sense_get_gain_sign());
         LOG_INF("   Proof of life will print 'FOC_CURRENT RUNNING ...' ~1x/s from the control loop.");
     } else {
-        LOG_WRN("   [WARN] torque_controller=FOC_CURRENT but SAADC NOT ready -> expect loud VOLTAGE-fallback warnings");
+        motor->torque_controller = VOLTAGE;
+        LOG_WRN("   [WARN] SAADC not ready -> keeping VOLTAGE mode (FOC_CURRENT not armed)");
     }
 #else
     /* ---- Telemetry-only: VOLTAGE torque, currents measured for DATA stream ----

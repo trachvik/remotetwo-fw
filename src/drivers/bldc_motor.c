@@ -688,18 +688,9 @@ void bldc_motor_loop_foc(bldc_motor_t *motor) // TO DO - anticogging conpensatio
             float id_meas = 0.0f, iq_meas = 0.0f;
             current_sense_get_foc_currents(motor->electrical_angle, &id_meas, &iq_meas);
 
-            /* SerialPlot stream: the three measured phase currents [mA], one
-             * line per control cycle, format "DATA:ia,ib,ic". These are the
-             * offset-corrected IOUTx the current loop just consumed
-             * (IOUTx = (SOx - offset)/GCSA, then the CSA correction matrix). */
-            {
-                float i_a = 0.0f, i_b = 0.0f, i_c = 0.0f;
-                current_sense_get_last_currents(&i_a, &i_b, &i_c);
-                printk("DATA:%d,%d,%d\n",
-                       (int)(i_a * 1000.0f),
-                       (int)(i_b * 1000.0f),
-                       (int)(i_c * 1000.0f));
-            }
+            /* IMPORTANT: do not print per-cycle DATA from this 5 kHz control loop.
+             * Blocking UART prints here destroy loop timing and destabilize FOC.
+             * Telemetry streaming is handled in haptic.c at a throttled rate. */
 
             motor->current.q = lowpass_filter_operator(&motor->lpf_current_q, iq_meas);
             motor->current.d = lowpass_filter_operator(&motor->lpf_current_d, id_meas);
