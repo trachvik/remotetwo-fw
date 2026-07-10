@@ -78,25 +78,31 @@ typedef struct {
     float q;
 } dq_current_t;
 
-/* PID controller structure */
+/* PID controller structure - identical to SimpleFOC PIDController.
+ * Ts > 0 : fixed sampling time, deterministic (no micros() jitter). Recommended
+ *          for fixed-rate FOC loops; set via bldc_motor_configure_current_loop().
+ * Ts <= 0 : adaptive - measures elapsed time with micros() each call (default). */
 typedef struct {
     float p;              /* Proportional gain */
     float i;              /* Integral gain */
     float d;              /* Derivative gain */
-    float output_ramp;    /* Maximum speed of change of output */
+    float output_ramp;    /* Max rate of change of output [unit/s]; 0 = disabled */
     float limit;          /* Maximum output value */
-    
+    float Ts;             /* Fixed sampling time [s]; NOT_SET or <=0 => adaptive */
+
     float error_prev;     /* Last tracking error */
     float output_prev;    /* Last PID output */
     float integral_prev;  /* Last integral component */
-    unsigned long timestamp_prev; /* Last execution timestamp */
+    unsigned long timestamp_prev; /* Last execution timestamp (adaptive mode) */
 } pid_controller_t;
 
-/* Low pass filter structure */
+/* Low pass filter structure - identical to SimpleFOC LowPassFilter.
+ * Ts > 0 : fixed sampling time (deterministic). Ts <= 0 : adaptive. */
 typedef struct {
-    float tf;             /* Time constant */
+    float tf;             /* Time constant [s]; cutoff_hz = 1/(2*pi*tf) */
+    float Ts;             /* Fixed sampling time [s]; NOT_SET or <=0 => adaptive */
     float y_prev;         /* Previous filtered value */
-    unsigned long timestamp_prev; /* Last execution timestamp */
+    unsigned long timestamp_prev; /* Last execution timestamp (adaptive mode) */
 } lowpass_filter_t;
 
 /**
@@ -313,10 +319,28 @@ float bldc_motor_electrical_angle(bldc_motor_t *motor);
 /* PID controller functions */
 void pid_controller_init(pid_controller_t *pid, float p, float i, float d, float ramp, float limit);
 float pid_controller_operator(pid_controller_t *pid, float error);
-void pid_controller_reset(pid_controller_t *pid);   // TO DO is this needed?
+void pid_controller_reset(pid_controller_t *pid);
 
 /* Low pass filter functions */
 void lowpass_filter_init(lowpass_filter_t *lpf, float tf);
-//float lowpass_filter_operator(lowpass_filter_t *lpf, float x);  // TO DO - do I need this?
+float lowpass_filter_operator(lowpass_filter_t *lpf, float x);
+
+/**
+ * Configure the current (Id/Iq) PI controllers and measurement LPFs from
+ * motor parameters using the SimpleFOC bandwidth method:
+ *   Kp = phase_inductance * 2*pi*bw_hz
+ *   Ki = phase_resistance  * 2*pi*bw_hz
+ *   LPF_Tf = 1 / (2*pi*lpf_cutoff_hz)
+ *   Ts (fixed) = 1 / foc_hz
+ *
+ * Call after voltage_limit is set and before enabling FOC_CURRENT.
+ * bw_hz      : current-loop closed-loop bandwidth in Hz (rule of thumb: 3-10% of foc_hz)
+ * foc_hz     : FOC loop rate in Hz (e.g. HAPTIC_LOOP_HZ)
+ * lpf_cutoff : LPF cutoff on measured Iq/Id in Hz (100-500 Hz; lower = quieter, slower)
+ */
+void bldc_motor_configure_current_loop(bldc_motor_t *motor,
+                                       float bw_hz,
+                                       float foc_hz,
+                                       float lpf_cutoff_hz);
 
 #endif /* BLDC_MOTOR_H */

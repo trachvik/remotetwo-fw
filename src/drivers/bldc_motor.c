@@ -156,6 +156,7 @@ void pid_controller_init(pid_controller_t *pid, float p, float i, float d, float
     pid->d = d;
     pid->output_ramp = ramp;
     pid->limit = limit;
+    pid->Ts = NOT_SET;  /* adaptive by default; set >0 for fixed-rate deterministic mode */
     pid->error_prev = 0.0f;
     pid->output_prev = 0.0f;
     pid->integral_prev = 0.0f;
@@ -169,10 +170,17 @@ float pid_controller_operator(pid_controller_t *pid, float error)
 {
     if (pid == NULL) return 0.0f;
 
-    unsigned long timestamp = micros();
-    float ts = (timestamp - pid->timestamp_prev) * 1e-6f;
-
-    if (ts <= 0.0f || ts > 0.5f) ts = 1e-3f;
+    /* Sampling time: use fixed Ts when set (deterministic FOC loop),
+     * otherwise measure elapsed time with micros() (SimpleFOC adaptive mode). */
+    float ts;
+    if (pid->Ts > 0.0f) {
+        ts = pid->Ts;
+    } else {
+        unsigned long timestamp = micros();
+        ts = (timestamp - pid->timestamp_prev) * 1e-6f;
+        if (ts <= 0.0f || ts > 0.5f) ts = 1e-3f;
+        pid->timestamp_prev = timestamp;
+    }
 
     /* Proportional term */
     float proportional = pid->p * error;
@@ -202,7 +210,7 @@ float pid_controller_operator(pid_controller_t *pid, float error)
     pid->integral_prev = integral;
     pid->output_prev = output;
     pid->error_prev = error;
-    pid->timestamp_prev = timestamp;
+    /* timestamp_prev already updated at the start in adaptive mode */
 
     return output;
 }
@@ -228,6 +236,7 @@ void lowpass_filter_init(lowpass_filter_t *lpf, float tf)
     if (lpf == NULL) return;
     
     lpf->tf = tf;
+    lpf->Ts = NOT_SET;  /* adaptive by default */
     lpf->y_prev = 0.0f;
     lpf->timestamp_prev = 0;
 }
@@ -238,18 +247,23 @@ void lowpass_filter_init(lowpass_filter_t *lpf, float tf)
 float lowpass_filter_operator(lowpass_filter_t *lpf, float x)
 {
     if (lpf == NULL) return x;
-    
-    unsigned long timestamp = micros();
-    float dt = (timestamp - lpf->timestamp_prev) * 1e-6f;
-    
-    if (dt < 0.0f || dt > 0.5f) dt = 1e-3f;
-    
+
+    /* Sampling time: fixed Ts or adaptive via micros(). */
+    float dt;
+    if (lpf->Ts > 0.0f) {
+        dt = lpf->Ts;
+    } else {
+        unsigned long timestamp = micros();
+        dt = (timestamp - lpf->timestamp_prev) * 1e-6f;
+        if (dt < 0.0f || dt > 0.5f) dt = 1e-3f;
+        lpf->timestamp_prev = timestamp;
+    }
+
+    /* alpha = Tf / (Tf + dt)  — identical to SimpleFOC LowPassFilter */
     float alpha = lpf->tf / (lpf->tf + dt);
     float y = alpha * lpf->y_prev + (1.0f - alpha) * x;
-    
+
     lpf->y_prev = y;
-    lpf->timestamp_prev = timestamp;
-    
     return y;
 }
 
@@ -779,6 +793,59 @@ int bldc_motor_align_current_sense(bldc_motor_t *motor)
     LOG_INF("current-sense align: Ia(alpha-drive)=%.3f A -> gain_sign=%+.0f",
             (double)raw_ia, (double)sign);
     return 1;
+}
+
+/**
+ * Configure the closed-loop current (Id/Iq) PI regulators and measurement LPFs
+ * from motor physical parameters using the SimpleFOC bandwidth (IMC) method:
+ *
+ *   ωc  = 2π · bw_hz
+ *   Kp  = phase_inductance · ωc    [V/A]
+ *   Ki  = phase_resistance  · ωc   [V/(A·s)]
+ *   LPF_Tf = 1/(2π · lpf_cutoff_hz)
+ *   Ts  = 1/foc_hz  (fixed, deterministic)
+ *
+ * Typical starting values for this motor (R=5.6Ω, L=100µH):
+ *   bw_hz=150 (3% of 5kHz) → Kp≈0.094 V/A, Ki≈5278 V/(A·s)
+ *   lpf_cutoff=500Hz → Tf≈318µs  (lower to ~200Hz if motor buzzes)
+ *
+ * Must be called AFTER voltage_limit is set and BEFORE enabling FOC_CURRENT.
+ */
+void bldc_motor_configure_current_loop(bldc_motor_t *motor,
+                                       float bw_hz,
+                                       float foc_hz,
+                                       float lpf_cutoff_hz)
+{
+    if (motor == NULL) return;
+
+    float omega_c  = _2PI * bw_hz;
+    float kp       = motor->phase_inductance * omega_c; /* P = L · ωc */
+    float ki       = motor->phase_resistance  * omega_c; /* I = R · ωc */
+    float Ts       = 1.0f / foc_hz;
+    float lpf_tf   = 1.0f / (_2PI * lpf_cutoff_hz);
+
+    /* Current PI: no derivative, no output ramp (0 = disabled).
+     * Output limited to ±voltage_limit (already set by caller). */
+    pid_controller_init(&motor->pid_current_q, kp, ki, 0.0f, 0.0f, motor->voltage_limit);
+    motor->pid_current_q.Ts = Ts;
+    pid_controller_init(&motor->pid_current_d, kp, ki, 0.0f, 0.0f, motor->voltage_limit);
+    motor->pid_current_d.Ts = Ts;
+
+    /* Measurement LPF on Iq and Id (applied before the PI).
+     * Filters the ±4 mA ADC noise before it reaches the integrator. */
+    lowpass_filter_init(&motor->lpf_current_q, lpf_tf);
+    motor->lpf_current_q.Ts = Ts;
+    lowpass_filter_init(&motor->lpf_current_d, lpf_tf);
+    motor->lpf_current_d.Ts = Ts;
+
+    LOG_INF("current loop configured: bw=%.0f Hz  foc=%.0f Hz  "
+            "Kp=%.4f V/A  Ki=%.1f V/(A*s) | "
+            "LPF fc=%.0f Hz  Tf=%.0f us  Ts=%.0f us",
+            (double)bw_hz, (double)foc_hz,
+            (double)kp,    (double)ki,
+            (double)lpf_cutoff_hz,
+            (double)(lpf_tf * 1e6f),
+            (double)(Ts    * 1e6f));
 }
 
 /**

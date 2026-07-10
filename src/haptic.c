@@ -79,10 +79,25 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
 /* PWM pin definitions removed, hardware is fully described in the board overlay. */
 
 /* Motor parameters */
-#define MOTOR_POLE_PAIRS 11     /* Number of pole pairs */
-#define MOTOR_PHASE_RESISTANCE 5.6f  /* Ohms */
-#define MOTOR_KV_RATING 141.0f  /* rpm/V */
-#define MOTOR_INDUCTANCE 0.0001f /* H */ // typical range: 0.1 - 10.0 mH, only needed for high-speed applications
+#define MOTOR_POLE_PAIRS       11
+#define MOTOR_PHASE_RESISTANCE 5.6f    /* Ω  — measured (2× shunt voltage at DC) */
+#define MOTOR_KV_RATING        141.0f  /* rpm/V */
+#define MOTOR_INDUCTANCE       0.0001f /* H = 100 µH  (typical 0.1-10 mH; use
+                                        * bldc_motor_configure_current_loop() to
+                                        * re-tune if the real value is measured) */
+
+/* ---- Current loop tuning (SimpleFOC bandwidth method) ----
+ * Kp = MOTOR_INDUCTANCE * 2π * BW_HZ
+ * Ki = MOTOR_PHASE_RESISTANCE * 2π * BW_HZ
+ * These are computed and applied by bldc_motor_configure_current_loop() at init.
+ *
+ * BW_HZ: closed-loop bandwidth in Hz.  Rule of thumb: 3-10% of HAPTIC_LOOP_HZ.
+ *   At 5 kHz loop: 3% = 150 Hz → Kp ≈ 0.094 V/A, Ki ≈ 5278 V/(A·s).
+ * LPF_CUTOFF_HZ: noise filter on measured Iq/Id before the PI.
+ *   Start at 500 Hz; decrease to 200-300 Hz if motor buzzes after enabling
+ *   current control (the LPF is the primary "anti-hiss" knob). */
+#define HAPTIC_CURRENT_LOOP_BW_HZ    150.0f  /* Hz; 3% of HAPTIC_LOOP_HZ */
+#define HAPTIC_CURRENT_LPF_CUTOFF_HZ 500.0f  /* Hz; lower → quieter but slower */
 
 /* ---- Torque control mode ----
  * The haptic law below computes a torque command in the voltage domain
@@ -99,7 +114,7 @@ LOG_MODULE_REGISTER(haptic, LOG_LEVEL_DBG);
  *   loop. The motor is driven open-loop in VOLTAGE mode (the feel that works),
  *   while the phase currents are still sampled every cycle and streamed. This
  *   is the "keep reading the ADCs but fix the haptic" configuration. */
-#define HAPTIC_USE_CURRENT_CONTROL 0
+#define HAPTIC_USE_CURRENT_CONTROL 1
 #define HAPTIC_CURRENT_SENSE_TELEMETRY 1
 #define HAPTIC_VOLT_TO_AMP   (1.0f / MOTOR_PHASE_RESISTANCE) /* V-domain torque -> A setpoint */
 #define HAPTIC_CURRENT_LIMIT 0.6f   /* A, hard clamp on the q-current setpoint */
@@ -400,6 +415,14 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     motor->pid_current_d.limit = motor->voltage_limit;
     motor->current_limit = HAPTIC_CURRENT_LIMIT;
     motor->torque_controller = FOC_CURRENT;
+
+    /* Compute PI gains and LPF cutoff from motor params + bandwidth formula.
+     * Kp = L·ωc, Ki = R·ωc, ωc = 2π·BW_HZ  (SimpleFOC IMC / bandwidth method).
+     * Fixed Ts = 1/HAPTIC_LOOP_HZ eliminates micros() jitter in the PI. */
+    bldc_motor_configure_current_loop(motor,
+                                      HAPTIC_CURRENT_LOOP_BW_HZ,
+                                      (float)HAPTIC_LOOP_HZ,
+                                      HAPTIC_CURRENT_LPF_CUTOFF_HZ);
 
     if (cs_ok) {
         /* Find current-sense polarity vs the driver so the q-current PID does
