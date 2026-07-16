@@ -19,16 +19,19 @@ elseif(CONFIG_APP_DRV_TEST)
     )
 elseif(CONFIG_APP_ANTICOGGING_TEST)
     target_sources(app PRIVATE
-        #src/main.c
-        #src/ui_display.c
-        #src/haptic.c
-        #src/remote_control.c
-        #src/BLE_commands.c
         src/drivers/tmag5170_sensor.c
         src/drivers/bldc_driver_3pwm.c
         src/drivers/bldc_motor.c
         src/drivers/current_sense.c
         src/drivers/anticogging.c
+    )
+elseif(CONFIG_APP_FOC_CURRENT_NOISE_REDUCTION_TEST)
+    target_sources(app PRIVATE
+        src/drivers/tmag5170_sensor.c
+        src/drivers/bldc_driver_3pwm.c
+        src/drivers/bldc_motor.c
+        src/drivers/current_sense.c
+        src/foc_current.c
     )
 else()
     target_sources(app PRIVATE

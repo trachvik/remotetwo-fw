@@ -12,7 +12,13 @@ config APP_DISP_TEST
 	bool "SSD1309 display communication test"
 	default n
 	help
-	  Builds disp_test.c only – cycles text on the display to verify SPI.
+	  Builds disp_test.c only - cycles text on the display to verify SPI.
+
+config APP_FOC_CURRENT_NOISE_REDUCTION_TEST
+    bool "Enable FOC Current Noise Reduction Test"
+    default n
+	help
+	  Builds foc_current.c only - runs a test to reduce current noise in FOC control.
 
 endmenu
 
