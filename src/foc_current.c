@@ -48,6 +48,8 @@ static int foc_power_rails_and_mute_oled(void)
 }
 SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 
+#define FOC_DO_CALIBRATION 0
+
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
 
@@ -155,18 +157,28 @@ static int standalone_haptic_init(void)
     /* Set voltage limits (0.58 margin is required for SVPWM without saturation) */
     motor.voltage_limit = HAPTIC_VOLTAGE_LIMIT * 0.58f; 
     motor.velocity_limit = 20.0f;
-    motor.voltage_sensor_align = 1.5f;
+    motor.voltage_sensor_align = motor.voltage_limit; /* ALWAYS calibrate with max voltage to overcome cogging */
     bldc_motor_init(&motor);
 
-    /* 4. Run FOC calibration (full SimpleFOC alignSensor sequence, internal).
+    /* 4. Run FOC calibration or set fixed values */
+
+#if FOC_DO_CALIBRATION
+    /* Full SimpleFOC alignSensor sequence, internal.
      * Direction and zero-electric-angle are determined by the calibration
      * itself, so nothing is pre-set here - the code is robust against swapped
      * motor phases. */
     LOG_INF("4. Running FOC calibration...");
     k_msleep(1000);
-
     bldc_motor_init_foc(&motor);
     LOG_INF("  [OK] FOC calibration complete!");
+#else
+    LOG_INF("4. Skipping FOC calibration, using hardcoded values.");
+    motor.sensor_direction = DIR_CW;
+    motor.zero_electric_angle = 3.6f;
+    bldc_motor_init_foc(&motor); 
+    
+    LOG_INF("  [OK] FOC math initialized safely!");
+#endif
 
     /* 5. Initialize FOC current sense (DRV8311H CSA via SAADC) */
     LOG_INF("5. Initializing FOC current sense...");
@@ -201,8 +213,11 @@ static int standalone_haptic_init(void)
                                           (float)HAPTIC_LOOP_HZ, 
                                           HAPTIC_CURRENT_LPF_CUTOFF_HZ);
 
-        bldc_motor_align_current_sense(&motor);
-        
+        #if FOC_DO_CALIBRATION
+            bldc_motor_align_current_sense(&motor);
+        #else
+            current_sense_set_gain_sign(1.0f);
+        #endif
         /* FORCE CLOSED LOOP CURRENT MODE */
         motor.torque_controller = FOC_CURRENT;
         LOG_INF("  [OK] FOC_CURRENT active!");
