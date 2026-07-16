@@ -513,26 +513,16 @@ int current_sense_calibrate_offsets(void)
     uint32_t start_scans = g_scan_count;
 
     for (int n = 0; n < rounds; n++) {
-        /* SW fallback: guarantee a SAMPLE trigger even when DPPI h_sample is
-         * not firing. Each trigger = 1 scan; after 8 scans the buffer fills
-         * and g_raw is updated via the DONE callback. */
-        /* Phase dither: k_msleep(1) == 1 ms == exactly 25 x 40 µs, so
-         * successive SW triggers would all land at the same PWM phase,
-         * causing the offset average to lock onto a switching transient
-         * instead of the quiet bias level. Adding 1 µs per iteration shifts
-         * the trigger phase by 1 µs each round; after 40 rounds we have
-         * sampled the full 40 µs period. Over 500 rounds this gives ~12.5
-         * complete rotations through the period - a good uniform average. */
-        k_busy_wait((uint32_t)(n % 40) + 1U);
-        if (g_armed) {
-            nrf_saadc_task_trigger(NRF_SAADC, NRF_SAADC_TASK_SAMPLE);
-        }
+        /* Necháme čistě pracovat hardware (DPPI).
+         * Za 1 ms hardware automaticky nasbírá 25 dokonalých vzorků 
+         * z těch nejtišších údolí PWM periody. My si jen přečteme ten nejnovější. */
         float v[NUM_CH];
         isense_read_volts(v);
         acc[0] += v[0];
         acc[1] += v[1];
         acc[2] += v[2];
-        k_msleep(1);
+        
+        k_msleep(1); /* Záměrný spánek pro sběr dalších hw vzorků */
     }
 
     for (int i = 0; i < NUM_CH; i++) {
@@ -542,9 +532,9 @@ int current_sense_calibrate_offsets(void)
     uint32_t scans = g_scan_count - start_scans;
     LOG_INF("offsets calibrated: SOA=%.3f SOB=%.3f SOC=%.3f V (expect ~VREF/2, %u synced scans)",
             (double)g_offset_v[0], (double)g_offset_v[1], (double)g_offset_v[2], scans);
+            
     if (scans == 0) {
-        LOG_WRN("NO HW-synced scans during calibration - is PWM0 running? "
-                "(buf_req=%u)", g_buf_req_count);
+        LOG_WRN("NO HW-synced scans during calibration - is PWM0 running? (buf_req=%u)", g_buf_req_count);
     }
     return 0;
 }

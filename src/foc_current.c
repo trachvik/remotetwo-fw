@@ -61,8 +61,8 @@ SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 #define MOTOR_INDUCTANCE       0.0001f /* H = 100 µH */
 
 /* Current loop tuning */
-#define HAPTIC_CURRENT_LOOP_BW_HZ    50.0f  /* Hz; stability-first baseline */
-#define HAPTIC_CURRENT_LPF_CUTOFF_HZ 120.0f /* Hz; stronger noise rejection */
+#define HAPTIC_CURRENT_LOOP_BW_HZ    15.0f  /* Hz; | 2 % of the foc loop frequency */
+#define HAPTIC_CURRENT_LPF_CUTOFF_HZ HAPTIC_CURRENT_LOOP_BW_HZ*3.3f /* Hz; from SimpleFOC docs | 5.0 -> 3.3*/
 #define HAPTIC_CURRENT_LIMIT         0.25f  /* A, hard clamp on q-current setpoint for safe bring-up */
 
 /* Global hardware instances for this standalone test */
@@ -158,25 +158,12 @@ static int standalone_haptic_init(void)
     motor.voltage_sensor_align = 1.5f;
     bldc_motor_init(&motor);
 
-    /* 4. Run FOC calibration */
+    /* 4. Run FOC calibration (full SimpleFOC alignSensor sequence, internal).
+     * Direction and zero-electric-angle are determined by the calibration
+     * itself, so nothing is pre-set here - the code is robust against swapped
+     * motor phases. */
     LOG_INF("4. Running FOC calibration...");
     k_msleep(1000);
-
-    motor.sensor_direction = DIR_CW;
-    motor.zero_electric_angle = 0.0f;
-    
-    /* Ramp up voltage to align the rotor */
-    for (int i = 0; i <= 50; i++) {
-        float v = motor.voltage_sensor_align * (float)i / 50.0f;
-        bldc_motor_set_phase_voltage(&motor, v, 0.0f, 4.71239f);
-        k_msleep(1);
-    }
-    k_msleep(700); /* Let the rotor settle */
-    
-    sensor_update(motor.sensor);
-    motor.zero_electric_angle = bldc_motor_electrical_angle(&motor);
-    bldc_motor_set_phase_voltage(&motor, 0.0f, 0.0f, 0.0f);
-    k_msleep(100);
 
     bldc_motor_init_foc(&motor);
     LOG_INF("  [OK] FOC calibration complete!");
@@ -184,6 +171,22 @@ static int standalone_haptic_init(void)
     /* 5. Initialize FOC current sense (DRV8311H CSA via SAADC) */
     LOG_INF("5. Initializing FOC current sense...");
     int cs_err = current_sense_init();
+
+    /* =========================================================================
+     * HARDWARE WORKAROUND: ADC WARMUP
+     * Pulse PWM in safe VOLTAGE mode (0.0V) to stabilize the SAADC and DPPI 
+     * chains BEFORE measuring the zero-current offsets. Prevents phantom currents.
+     * ========================================================================= */
+    motor.torque_controller = VOLTAGE; 
+    motor.target = 0.0f;
+    for (int i = 0; i < 100; i++) {
+        bldc_motor_loop_foc(&motor);
+        bldc_motor_move(&motor, 0.0f);
+        k_msleep(1);
+    }
+    k_msleep(200);
+    sensor_update(motor.sensor);
+    /* ========================================================================= */
     
     if (cs_err == 0 && current_sense_is_ready()) {
         current_sense_calibrate_offsets();

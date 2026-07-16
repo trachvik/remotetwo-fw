@@ -343,27 +343,13 @@ int haptic_init(bldc_motor_t *motor, bldc_driver_t *driver, sensor_t *encoder)
     }
     LOG_INF("   [OK] Motor initialized");
 
-    /* Run FOC calibration */
+    /* Run FOC calibration (full SimpleFOC alignSensor sequence, internal).
+     * Direction and zero-electric-angle are determined by the calibration
+     * itself, so nothing is pre-set here - the code is robust against swapped
+     * motor phases. */
     LOG_INF("4. Running FOC calibration...");
     k_msleep(1000);
 
-    /* Inline zero-electric-angle measurement: ramp up voltage at 3pi/2,
-     * hold, read encoder. Same call depth as the working settle loop below
-     * (avoids stack overflow that hung inside bldc_motor_init_foc). */
-    motor->sensor_direction = DIR_CW;
-    motor->zero_electric_angle = 0.0f;  /* clear offset before measurement */
-    for (int i = 0; i <= 50; i++) {
-        float v = motor->voltage_sensor_align * (float)i / 50.0f;
-        bldc_motor_set_phase_voltage(motor, v, 0.0f, 4.71239f); /* _3PI_2 */
-        k_msleep(1);
-    }
-    k_msleep(700);  /* let rotor settle */
-    sensor_update(motor->sensor);
-    motor->zero_electric_angle = bldc_motor_electrical_angle(motor);
-    bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
-    k_msleep(100);
-
-    /* bldc_motor_init_foc will now skip both loops (dir=CW, zero_el set) */
     if (!bldc_motor_init_foc(motor))
     {
         LOG_ERR("   FOC calibration failed");

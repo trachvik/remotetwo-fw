@@ -1,0 +1,20 @@
+{
+  "files.exclude": {
+    "**/build*": true,
+    "**/docs*": true,
+    "**/.venv": true,
+    "**/sysbuild": true
+  },
+  "search.exclude": {
+    "**/build*": true,
+    "**/docs*": true,
+    "**/.venv": true,
+    "**/sysbuild": true
+  },
+  "files.watcherExclude": {
+    "**/build*/**": true,
+    "**/docs*": true,
+    "**/.venv": true,
+    "**/sysbuild": true
+  }
+}

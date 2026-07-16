@@ -547,117 +547,108 @@ void bldc_motor_set_phase_voltage(bldc_motor_t *motor, float uq, float ud, float
 int bldc_motor_init_foc(bldc_motor_t *motor)
 {
     if (motor == NULL) return 0;
-    
+
+    int exit_flag = 1;
+
     motor->motor_status = MOTOR_CALIBRATING;
-    
-    /* If no sensor, only openloop is possible */
-    /*if (motor->sensor == NULL) {
-        if (motor->controller == VELOCITY_OPENLOOP || motor->controller == ANGLE_OPENLOOP) {
-            motor->motor_status = MOTOR_READY;
-            return 1;
-        }
-        motor->motor_status = MOTOR_CALIB_FAILED;
-        bldc_motor_disable(motor);
-        return 0;
-    }*/
-    
-    /* Sensor detected - perform alignment */
-    sensor_update(motor->sensor);
-    
-    /* Check if sensor needs index search */
-    if (sensor_needs_search(motor->sensor)) {
+
+    /* No sensor -> no sensored FOC possible on this build. */
+    if (motor->sensor == NULL) {
+        LOG_ERR("MOT: no sensor - sensored FOC not possible");
         motor->motor_status = MOTOR_CALIB_FAILED;
         bldc_motor_disable(motor);
         return 0;
     }
-    
+
+    /* ==================== alignSensor() (SimpleFOC) ==================== */
+    LOG_INF("MOT: Align sensor.");
+
+    /* Refresh the sensor and make sure it does not require an index search. */
+    sensor_update(motor->sensor);
+    if (sensor_needs_search(motor->sensor)) {
+        LOG_ERR("MOT: sensor index search required (unsupported)");
+        motor->motor_status = MOTOR_CALIB_FAILED;
+        bldc_motor_disable(motor);
+        return 0;
+    }
+
+    /* Fixed voltage used for the alignment (SimpleFOC v3.1 behaviour). */
     float voltage_align = motor->voltage_sensor_align;
-    
-    /* Determine sensor direction if unknown */
+
+    /* ---- Natural direction detection (only if unknown) ---- */
     if (motor->sensor_direction == DIR_UNKNOWN) {
-        /* Gradually ramp up voltage to avoid sudden jerk */
-        for (int i = 0; i < 100; i++) {
-            float voltage_ramp = voltage_align * i / 100.0f;
-            bldc_motor_set_phase_voltage(motor, voltage_ramp, 0.0f, _3PI_2);
-            k_msleep(5);
-        }
-        k_msleep(300);
-        
-        /* Move one electrical revolution forward - smoother with more steps */
-        for (int i = 0; i <= 1000; i++) {
-            float angle = _3PI_2 + _2PI * i / 1000.0f;
+        /* Move one electrical revolution forward. */
+        for (int i = 0; i <= 500; i++) {
+            float angle = _3PI_2 + _2PI * (float)i / 500.0f;
             bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, angle);
             sensor_update(motor->sensor);
-            k_msleep(1);  /* 1ms for smoother motion */
-        }
-        /* Read angle in the middle */
-        sensor_update(motor->sensor);
-        float mid_angle = sensor_get_angle(motor->sensor);
-        
-        /* Move one electrical revolution backward */
-        for (int i = 1000; i >= 0; i--) {
-            float angle = _3PI_2 + _2PI * i / 1000.0f;
-            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, angle);
-            sensor_update(motor->sensor);
-            k_msleep(1);  /* 1ms for smoother motion */
-        }
-        /* Gradually ramp down voltage */
-        for (int i = 100; i >= 0; i--) {
-            float voltage_ramp = voltage_align * i / 100.0f;
-            bldc_motor_set_phase_voltage(motor, voltage_ramp, 0.0f, _3PI_2);
             k_msleep(2);
         }
-        
+        /* Take an angle in the middle. */
+        sensor_update(motor->sensor);
+        float mid_angle = sensor_get_angle(motor->sensor);
+
+        /* Move one electrical revolution backwards. */
+        for (int i = 500; i >= 0; i--) {
+            float angle = _3PI_2 + _2PI * (float)i / 500.0f;
+            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, angle);
+            sensor_update(motor->sensor);
+            k_msleep(2);
+        }
         sensor_update(motor->sensor);
         float end_angle = sensor_get_angle(motor->sensor);
         bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
         k_msleep(200);
-        
-        /* Determine direction from movement */
+
+        /* Determine the direction the sensor moved. */
         float moved = fabsf(mid_angle - end_angle);
         if (moved < MIN_ANGLE_DETECT_MOVEMENT) {
-            /* Failed to detect movement */
+            LOG_ERR("MOT: Failed to notice movement");
             motor->motor_status = MOTOR_CALIB_FAILED;
             bldc_motor_disable(motor);
-            return 0;
+            return 0;   /* failed calibration */
         } else if (mid_angle < end_angle) {
+            LOG_INF("MOT: sensor_direction == CCW");
             motor->sensor_direction = DIR_CCW;
         } else {
+            LOG_INF("MOT: sensor_direction == CW");
             motor->sensor_direction = DIR_CW;
         }
-    }
-    
-    /* Zero electric angle alignment */
-    if (!_ISSET(motor->zero_electric_angle)) {
-        /* Gradually ramp to alignment position */
-        for (int i = 0; i < 100; i++) {
-            float voltage_ramp = voltage_align * i / 100.0f;
-            bldc_motor_set_phase_voltage(motor, voltage_ramp, 0.0f, _3PI_2);
-            k_msleep(3);
+
+        /* Pole pair number sanity check. */
+        float moved_electr = moved * (float)motor->pole_pairs;
+        if (fabsf(moved_electr - _2PI) > 0.5f) {
+            LOG_WRN("MOT: PP check: fail - estimated pp: %.1f",
+                    (double)(_2PI / moved));
+        } else {
+            LOG_INF("MOT: PP check: OK!");
         }
-        k_msleep(500);
-        
-        /* Read sensor and get zero electric angle */
+    } else {
+        LOG_INF("MOT: Skip dir calib.");
+    }
+
+    /* ---- Zero electric angle offset (only if unknown) ---- */
+    if (!_ISSET(motor->zero_electric_angle)) {
+        /* Align the electrical phases of the motor and sensor:
+         * set angle -90 deg (270 = 3*PI/2). */
+        bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2);
+        k_msleep(700);
+        /* Read the sensor. */
         sensor_update(motor->sensor);
+        /* Get the current zero electric angle. */
         motor->zero_electric_angle = 0.0f;
         motor->zero_electric_angle = bldc_motor_electrical_angle(motor);
-        
         k_msleep(20);
-        
-        /* Gradually ramp down voltage for smooth stop */
-        for (int i = 100; i >= 0; i--) {
-            float voltage_ramp = voltage_align * i / 100.0f;
-            bldc_motor_set_phase_voltage(motor, voltage_ramp, 0.0f, _3PI_2);
-            k_msleep(2);
-        }
-        
-        /* Stop motor */
+        /* Stop everything. */
         bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
         k_msleep(200);
+        LOG_INF("MOT: Zero elec. angle: %.3f", (double)motor->zero_electric_angle);
+    } else {
+        LOG_INF("MOT: Skip offset calib.");
     }
-    
+
     motor->motor_status = MOTOR_READY;
-    return 1;
+    return exit_flag;
 }
 
 /**
