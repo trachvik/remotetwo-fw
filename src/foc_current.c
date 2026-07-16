@@ -5,6 +5,8 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/init.h>
+#include <hal/nrf_gpio.h>
 
 /* Adjust these includes based on your project structure */
 #include "drivers/tmag5170_sensor.h"
@@ -13,6 +15,38 @@
 #include "drivers/bldc_driver_3pwm.h"
 
 LOG_MODULE_REGISTER(foc_current_test, LOG_LEVEL_INF);
+
+/* Replicate the proven power-rail sequencing from ui_display.c:
+ * - Enable CTRL (P0.30) early so SPI peripherals on this rail are powered.
+ * - Keep MIC2288 boost (P0.28) OFF for standalone FOC test.
+ * - Keep OLED held quiet on the shared SPI bus.
+ * Run before TMAG sensor init (SENSOR init priority is 90). */
+static int foc_power_rails_and_mute_oled(void)
+{
+    const uint32_t oled_cs  = NRF_GPIO_PIN_MAP(0, 2);   /* CSn_OLED  (active low) */
+    const uint32_t oled_rst = NRF_GPIO_PIN_MAP(1, 14);  /* OLED_RST  (active low) */
+    const uint32_t disp_mos = NRF_GPIO_PIN_MAP(0, 28);  /* MIC2288_MOS (active high) */
+    const uint32_t disp_pwr = NRF_GPIO_PIN_MAP(0, 30);  /* CTRL        (active high) */
+
+    /* Keep panel boost OFF in this test app. */
+    nrf_gpio_cfg_output(disp_mos);
+    nrf_gpio_pin_clear(disp_mos);
+
+    /* Enable logic power rail used by board peripherals (critical for TMAG). */
+    nrf_gpio_cfg_output(disp_pwr);
+    nrf_gpio_pin_set(disp_pwr);
+
+    k_msleep(20);
+
+    nrf_gpio_cfg_output(oled_cs);
+    nrf_gpio_pin_set(oled_cs);   /* CS high -> OLED tri-state on SPI */
+
+    nrf_gpio_cfg_output(oled_rst);
+    nrf_gpio_pin_clear(oled_rst); /* Hold display in reset */
+
+    return 0;
+}
+SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
@@ -98,7 +132,11 @@ static int standalone_haptic_init(void)
 {
     /* 1. Initialize TMAG5170 encoder */
     LOG_INF("1. Initializing TMAG5170 encoder...");
-    tmag5170_init(&encoder);
+    int enc_err = tmag5170_init(&encoder);
+    if (enc_err < 0) {
+        LOG_ERR("  [FAIL] TMAG5170 init failed: %d", enc_err);
+        return enc_err;
+    }
 
     /* 2. Initialize DRV8311H 3PWM Driver */
     LOG_INF("2. Initializing DRV8311H 3PWM driver...");
@@ -165,28 +203,6 @@ static int standalone_haptic_init(void)
         /* FORCE CLOSED LOOP CURRENT MODE */
         motor.torque_controller = FOC_CURRENT;
         LOG_INF("  [OK] FOC_CURRENT active!");
-
-        /* Warm-up: run 100 FOC iterations at 0 A before starting the timer.
-         * Mirrors haptic.c's post-enable settle loop.  This gives the current
-         * PID integrators time to converge to zero and lets the SAADC DPPI
-         * chain reach steady-state.  Without this, bldc_motor_align_current_sense
-         * leaves the DPPI/TIMER2 chain freshly armed (~0 ms ago); the first
-         * sensor_sample_fetch in the haptic thread hits this noisy window and
-         * returns -EIO, which self-reinforces into permanent CRC failures. */
-        motor.target = 0.0f;
-        for (int i = 0; i < 100; i++) {
-            bldc_motor_loop_foc(&motor);
-            bldc_motor_move(&motor, 0.0f);
-            k_msleep(1);
-        }
-        k_msleep(200);
-
-        /* Final sensor update before the 5 kHz timer fires.
-         * Sets g_last_update_us = now, so the first few haptic-thread calls
-         * hit the 800 µs rate limiter and skip sensor_sample_fetch.  By the
-         * time the limiter opens (~800 µs later), the DPPI chain and PLL are
-         * fully settled and the CRC checks pass reliably. */
-        sensor_update(motor.sensor);
     } else {
         LOG_ERR("  [FAIL] SAADC not ready, cannot test current control!");
         return -1; /* Stop execution if ADC is dead, no point in continuing */

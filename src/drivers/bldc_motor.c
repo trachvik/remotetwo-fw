@@ -699,25 +699,7 @@ void bldc_motor_loop_foc(bldc_motor_t *motor) // TO DO - anticogging conpensatio
                                                         motor->current_sp - motor->current.q);
             motor->voltage.d = pid_controller_operator(&motor->pid_current_d,
                                                         -motor->current.d);
-
-            /* PROOF that the current loop is really running (not a silent voltage
-             * fallback): once per ~second, dump the measured d/q currents and the
-             * resulting voltage commands. Iq/Id are physically measured from the
-             * SAADC and respond to load - impossible to fake in voltage mode. */
-            if ((foc_cyc++ % 1000u) == 0u) {
-                float va = 0, vb = 0, vc = 0;
-                current_sense_get_raw_volts(&va, &vb, &vc);
-                phase_current_t pc = current_sense_get_phase_currents();
-                LOG_INF("FOC_CURRENT RUNNING cyc=%u Isp=%.3fA Iq=%.3fA Id=%.3fA -> Uq=%.2fV Ud=%.2fV",
-                        foc_cyc,
-                        (double)motor->current_sp,
-                        (double)motor->current.q, (double)motor->current.d,
-                        (double)motor->voltage.q, (double)motor->voltage.d);
-                LOG_INF("   raw SOA=%.3f SOB=%.3f SOC=%.3f V | Ia=%.3f Ib=%.3f Ic=%.3f A | scans=%u",
-                        (double)va, (double)vb, (double)vc,
-                        (double)pc.a, (double)pc.b, (double)pc.c,
-                        current_sense_get_scan_count());
-            }
+            foc_cyc++;
         } else {
             /* Current sense NOT available. Do NOT pretend we are in current
              * control. Drive a voltage so the knob still works, but SHOUT about
