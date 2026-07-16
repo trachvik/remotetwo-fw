@@ -172,12 +172,51 @@ static int standalone_haptic_init(void)
     bldc_motor_init_foc(&motor);
     LOG_INF("  [OK] FOC calibration complete!");
 #else
-    LOG_INF("4. Skipping FOC calibration, using hardcoded values.");
-    motor.sensor_direction = DIR_CW;
-    motor.zero_electric_angle = 3.6f;
-    bldc_motor_init_foc(&motor); 
+LOG_INF("4. Running BULLETPROOF diagnostic alignment...");
     
-    LOG_INF("  [OK] FOC math initialized safely!");
+    /* 1. Jemná rampa napětí k D-ose (bez kmitání a zvonového efektu) */
+    float align_voltage = 2.0f;
+    for (int i = 0; i <= 100; i++) {
+        float v = align_voltage * (float)i / 100.0f;
+        /* SimpleFOC historicky zarovnává posláním Uq=V na 270 stupňů (4.712 rad) */
+        bldc_motor_set_phase_voltage(&motor, v, 0.0f, 4.71239f);
+        k_msleep(2);
+    }
+    LOG_INF("Rotor uzamčen. Čekám 1 sekundu na naprosté fyzické uklidnění...");
+    k_msleep(1000);
+
+    /* 2. Změření absolutně přesné nuly */
+    sensor_update(motor.sensor);
+    float true_zero = bldc_motor_electrical_angle(&motor);
+    float start_mech = sensor_get_angle(motor.sensor);
+    LOG_INF(">>> SKUTEČNÝ NULOVÝ ÚHEL: %.4f <<<", (double)true_zero);
+
+    /* 3. Zjištění směru (DIR_CW vs DIR_CCW) */
+    LOG_INF("Aplikuji jemný tah vpřed pro zjištění polarity senzoru...");
+    /* Pošleme napětí pod skutečným úhlem, což motor donutí popojet vpřed */
+    bldc_motor_set_phase_voltage(&motor, align_voltage, 0.0f, true_zero);
+    k_msleep(400); /* Necháme hřídel fyzicky pootočit */
+
+    sensor_update(motor.sensor);
+    float end_mech = sensor_get_angle(motor.sensor);
+    
+    /* Ochrana proti přetočení přes 360 stupňů (wrap-around) */
+    float diff = end_mech - start_mech;
+    if (diff > 3.14159f) diff -= 6.28318f;
+    if (diff < -3.14159f) diff += 6.28318f;
+    
+    int detected_dir = (diff > 0.0f) ? DIR_CW : DIR_CCW;
+    LOG_INF(">>> DETEKOVANÝ SMĚR SENZORU: %s <<<", detected_dir == DIR_CW ? "DIR_CW" : "DIR_CCW");
+
+    /* Vypnutí motoru */
+    bldc_motor_set_phase_voltage(&motor, 0.0f, 0.0f, 0.0f);
+    k_msleep(200);
+
+    /* 4. Aplikace dokonalých fyzikálních konstant a inicializace FOC */
+    motor.zero_electric_angle = true_zero;
+    motor.sensor_direction = detected_dir;
+    bldc_motor_init_foc(&motor);
+    LOG_INF("  [OK] FOC matematika úspěšně naplněna čistými daty!");
 #endif
 
     /* 5. Initialize FOC current sense (DRV8311H CSA via SAADC) */
