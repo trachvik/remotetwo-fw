@@ -32,6 +32,7 @@ elseif(CONFIG_APP_FOC_CURRENT_NOISE_REDUCTION_TEST)
         src/drivers/bldc_motor.c
         src/drivers/current_sense.c
         src/foc_current.c
+        src/drivers/anticogging.c
     )
 else()
     target_sources(app PRIVATE

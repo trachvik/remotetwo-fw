@@ -14,6 +14,7 @@
 #include "drivers/current_sense.h"
 #include "drivers/bldc_motor.h"
 #include "drivers/bldc_driver_3pwm.h"
+#include "drivers/anticogging.h"
 
 LOG_MODULE_REGISTER(foc_current_test, LOG_LEVEL_INF);
 
@@ -103,28 +104,34 @@ static void haptic_loop(bldc_motor_t *m)
     static int move_divider = 0;
     if (++move_divider >= 50) { 
         move_divider = 0;
-        
-        /* Cílová rychlost 1 ot/s */
         float target_velocity_rad_s = 6.283f; 
         bldc_motor_move(m, target_velocity_rad_s);
     }
 
-    /* 3. PROUDOVÁ SMYČKA */
+    /* 3. ANTICOGGING INJEKCE */
+    float ff = anticogging_get_feedforward(sensor_get_angle(m->sensor));
+    float original_sp = m->current_sp; /* Uložíme čistou hodnotu z PIDu */
+    m->current_sp += ff;               /* Přidáme mapu na překonání zubu */
+
+    /* 4. PROUDOVÁ SMYČKA */
     bldc_motor_loop_foc(m);
+
+    /* Obnovíme čistou PID hodnotu, aby se nezapsala zpět do struktury */
+    m->current_sp = original_sp; 
 
     /* --- SERIALPLOT LOGOVÁNÍ (100 Hz) --- */
     static int log_counter = 0;
     if (++log_counter >= 50) { 
         log_counter = 0;
-        
-        // Vytáhneme surová data přímo ze senzoru
         float raw_vel = sensor_get_velocity(m->sensor);
         
-        /* DATA formát: Surová rychlost, Rychlost pro PID, Výstup PID (*10) */
         printk("DATA:%f,%f,%f\n", 
-               (double)raw_vel,             // 1. Skutečná fyzická rychlost (např. těch 39)
-               (double)m->shaft_velocity,   // 2. To, co vidí regulátor (zřejmě 0)
-               (double)(m->current_sp * 10.0f)); // 3. Akce regulátoru
+               (double)raw_vel,             
+               (double)m->shaft_velocity,   
+               (double)(original_sp * 10.0f)); 
+               /* Vykreslujeme original_sp! V SerialPlotu byste měl vidět, jak se 
+                * zelená vlna postupně zmenšuje a rovná k nule, protože se o překonávání 
+                * zubů už nestará regulátor, ale mapa (ff). */
     }
 }
 
@@ -257,18 +264,26 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
         #endif
         /* FORCE CLOSED LOOP CURRENT MODE */
         motor.torque_controller = FOC_CURRENT;
-        LOG_INF("  [OK] FOC_CURRENT active!");
+        printk("  [OK] FOC_CURRENT active!");
     } else {
         LOG_ERR("  [FAIL] SAADC not ready, cannot test current control!");
         return -1; /* Stop execution if ADC is dead, no point in continuing */
     }
 
-    /* Start 5 kHz FOC control loop */
+    printk("---> [DEBUG 2] Spoustim 5kHz casovac...\n");
     k_timer_init(&haptic_timer, haptic_timer_cb, NULL);
-    k_thread_create(&haptic_thread_data, haptic_stack, K_THREAD_STACK_SIZEOF(haptic_stack),
-                    haptic_thread_fn, NULL, NULL, NULL, HAPTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
-    k_thread_name_set(&haptic_thread_data, "haptic_foc");
     k_timer_start(&haptic_timer, K_USEC(1000000U / HAPTIC_LOOP_HZ), K_USEC(1000000U / HAPTIC_LOOP_HZ));
+
+    printk("---> [DEBUG 3] Jdu volat kalibraci...\n");
+    k_msleep(10); /* Dáme procesoru 10 ms pauzu, aby si srovnal dech */
+
+    anticogging_calibrate(&motor, &haptic_sem);
+
+    printk("---> [DEBUG 4] Kalibrace hotova, vytvarim vlakno...\n");
+    
+    k_thread_create(&haptic_thread_data, haptic_stack, K_THREAD_STACK_SIZEOF(haptic_stack),
+                    haptic_thread_fn, NULL, NULL, NULL, HAPTIC_THREAD_PRIORITY, K_FP_REGS, K_NO_WAIT);
+    k_thread_name_set(&haptic_thread_data, "haptic_foc");
 
     return 0;
 }
