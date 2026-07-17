@@ -304,8 +304,8 @@ void bldc_motor_init_struct(bldc_motor_t *motor, int pp, float r, float kv, floa
     motor->sensor_offset = 0.0f;
     
     /* Control configuration */
-    //motor->torque_controller = VOLTAGE;
-    //motor->controller = TORQUE;
+    motor->torque_controller = VOLTAGE;
+    motor->controller = TORQUE;
     motor->foc_modulation = SPACE_VECTOR_PWM;  /* SVPWM: min/max zero-seq, lower THD */
     motor->modulation_centered = 1;
     
@@ -351,11 +351,11 @@ void bldc_motor_link_sensor(bldc_motor_t *motor, sensor_t *sensor)
 /**
  * Link current sense to motor
  */
-/*void bldc_motor_link_current_sense(bldc_motor_t *motor, current_sense_t *current_sense)
+void bldc_motor_link_current_sense(bldc_motor_t *motor, current_sense_t *current_sense)
 {
     if (motor == NULL) return;
     motor->current_sense = current_sense;
-}*/
+}
 
 /**
  * Calculate shaft angle
@@ -417,10 +417,10 @@ int bldc_motor_init(bldc_motor_t *motor)
     }
     
     /* Update controller limits */
-    /*if (motor->current_sense != NULL) {
+    if (motor->current_sense != NULL) {
         motor->pid_current_q.limit = motor->voltage_limit;
         motor->pid_current_d.limit = motor->voltage_limit;
-    }*/
+    }
     
     if (_ISSET(motor->phase_resistance) /*|| motor->torque_controller != VOLTAGE*/) {
         motor->pid_velocity.limit = motor->current_limit;
@@ -431,12 +431,12 @@ int bldc_motor_init(bldc_motor_t *motor)
     motor->p_angle.limit = motor->velocity_limit;
     
     /* Set default direction for open loop if no sensor */
-    /*if (motor->sensor == NULL) {
+    if (motor->sensor == NULL) {
         if ((motor->controller == VELOCITY_OPENLOOP || motor->controller == ANGLE_OPENLOOP) &&
             motor->sensor_direction == DIR_UNKNOWN) {
             motor->sensor_direction = DIR_CW;
         }
-    }*/
+    }
     
     k_msleep(500);  /* Short delay for stability */
     bldc_motor_enable(motor);
@@ -453,9 +453,9 @@ void bldc_motor_disable(bldc_motor_t *motor)
 {
     if (motor == NULL || motor->driver == NULL) return;
     
-    /*if (motor->current_sense != NULL) {
-        current_sense_disable(motor->current_sense);
-    }*/
+    //if (motor->current_sense != NULL) {
+        //(motor->current_sense);
+    //}
     
     driver_set_pwm(motor->driver, 0.0f, 0.0f, 0.0f);
     driver_disable(motor->driver);
@@ -826,60 +826,74 @@ void bldc_motor_move(bldc_motor_t *motor, float target)
     }
     
     /* Update shaft angle and velocity for calculations */
-    //if (motor->controller != ANGLE_OPENLOOP && motor->controller != VELOCITY_OPENLOOP) {
-        motor->shaft_angle = bldc_motor_shaft_angle(motor);
-    //}
+    motor->shaft_angle = bldc_motor_shaft_angle(motor);
     motor->shaft_velocity = bldc_motor_shaft_velocity(motor);
     
     /* If disabled, do nothing */
     if (!motor->enabled) return;
     
     /* Calculate back-EMF voltage if KV rating available */
-    /* U_bemf = velocity / (KV * sqrt(3)) [in mechanical rad/s to electrical V] */
     #define _SQRT3 1.732050808f
     #define _RPM_TO_RADS 0.10471975512f
     if (_ISSET(motor->kv_rating)) {
         motor->voltage_bemf = motor->shaft_velocity / (motor->kv_rating * _SQRT3) / _RPM_TO_RADS;
     }
     
-    /* Estimate motor current if phase resistance available and no current sense */
-    /*if (motor->current_sense == NULL && _ISSET(motor->phase_resistance)) {
-        motor->current.q = (motor->voltage.q - motor->voltage_bemf) / motor->phase_resistance;
-    }*/
-    
     /* Motion control based on controller type */
-    //switch (motor->controller) {
-        //case TORQUE:
-            /* Torque control - voltage mode */
+    switch (motor->controller) {
+        case TORQUE:
             if (motor->torque_controller == VOLTAGE) {
                 /* Pure voltage control - target is voltage directly */
-                motor->voltage.q = motor->target;
-                
-                /* Constrain q voltage */
-                motor->voltage.q = _CONSTRAIN(motor->voltage.q, -motor->voltage_limit, motor->voltage_limit);
-                
-                /* Set d-axis voltage to 0 for simple voltage control */
+                motor->voltage.q = _CONSTRAIN(motor->target, -motor->voltage_limit, motor->voltage_limit);
                 motor->voltage.d = 0.0f;
             } else {
-                /* Current control mode */
+                /* Current control mode - target is current in Amps */
                 motor->current_sp = motor->target;
             }
-        //     break;
+            break;
             
-        // case VELOCITY:
-        //     /* Velocity control with PID */
-        //     /* TODO: Implement velocity PID */
-        //     break;
+        case VELOCITY:
+        {
+            /* Velocity control with PID */
+            float velocity_error = motor->target - motor->shaft_velocity;
             
-        // case ANGLE:
-        //     /* Angle control with cascaded PID */
-        //     /* TODO: Implement angle PID */
-        //     break;
+            /* Output of velocity PID is the target for the torque controller (current or voltage) */
+            float pid_output = pid_controller_operator(&motor->pid_velocity, velocity_error);
             
-        // case VELOCITY_OPENLOOP:
-        // case ANGLE_OPENLOOP:
-        //     /* Open loop modes */
-        //     /* TODO: Implement open loop control */
-        //     break;
-    //}
+            if (motor->torque_controller == VOLTAGE) {
+                motor->voltage.q = _CONSTRAIN(pid_output, -motor->voltage_limit, motor->voltage_limit);
+                motor->voltage.d = 0.0f;
+            } else {
+                motor->current_sp = pid_output;
+            }
+            break;
+        }
+            
+        case ANGLE:
+        {
+            /* Angle control with cascaded PID */
+            float angle_error = motor->target - motor->shaft_angle;
+            
+            /* Output of angle P-controller is target velocity */
+            float target_velocity = pid_controller_operator(&motor->p_angle, angle_error);
+            
+            /* Calculate velocity error */
+            float velocity_error = target_velocity - motor->shaft_velocity;
+            
+            /* Output of velocity PID is target torque (current or voltage) */
+            float pid_output = pid_controller_operator(&motor->pid_velocity, velocity_error);
+            
+            if (motor->torque_controller == VOLTAGE) {
+                motor->voltage.q = _CONSTRAIN(pid_output, -motor->voltage_limit, motor->voltage_limit);
+                motor->voltage.d = 0.0f;
+            } else {
+                motor->current_sp = pid_output;
+            }
+            break;
+        }
+            
+        default:
+            /* Open loop modes can be added later if needed */
+            break;
+    }
 }

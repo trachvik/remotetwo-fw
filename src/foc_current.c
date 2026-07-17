@@ -96,35 +96,35 @@ static void haptic_timer_cb(struct k_timer *timer)
  */
 static void haptic_loop(bldc_motor_t *m)
 {
-    /* 1. Update sensor (Required for electrical angle and Park/Clarke transformations) */
+    /* 1. Update sensor */
     sensor_update(m->sensor);
 
-    /* =========================================================================
-     * TEST ZONE: Set the target current here for testing
-     * ========================================================================= 
-     * 0.0f -> Silence test (motor must stand still and make no noise)
-     * 0.2f -> Smooth pull test (motor pulls steadily without whining or vibrating)
-     */
-    float target_current_amps = 0.0f;
+    /* 2. RYCHLOSTNÍ SMYČKA - DOWNSAMPLING na 100 Hz */
+    static int move_divider = 0;
+    if (++move_divider >= 50) { 
+        move_divider = 0;
+        
+        /* Cílová rychlost 1 ot/s */
+        float target_velocity_rad_s = 6.283f; 
+        bldc_motor_move(m, target_velocity_rad_s);
+    }
 
-    /* Safety clamp */
-    if (target_current_amps > HAPTIC_CURRENT_LIMIT) target_current_amps = HAPTIC_CURRENT_LIMIT;
-    if (target_current_amps < -HAPTIC_CURRENT_LIMIT) target_current_amps = -HAPTIC_CURRENT_LIMIT;
-
-    /* 2. Send to FOC algorithm */
-    bldc_motor_move(m, target_current_amps);
+    /* 3. PROUDOVÁ SMYČKA */
     bldc_motor_loop_foc(m);
 
-/* --- Sonda stavu smyčky --- */
+    /* --- SERIALPLOT LOGOVÁNÍ (100 Hz) --- */
     static int log_counter = 0;
-    if (++log_counter >= 5000) { 
+    if (++log_counter >= 50) { 
         log_counter = 0;
-        float actual_iq = m->current.q;
-        float output_uq = m->voltage.q;
-        float mech_angle = sensor_get_angle(m->sensor);
         
-        printk("Target: %.2fA | Iq: %.3fA | Uq: %.3fV | Mech_Ang: %.2f\n", 
-                (double)target_current_amps, (double)actual_iq, (double)output_uq, (double)mech_angle);
+        // Vytáhneme surová data přímo ze senzoru
+        float raw_vel = sensor_get_velocity(m->sensor);
+        
+        /* DATA formát: Surová rychlost, Rychlost pro PID, Výstup PID (*10) */
+        printk("DATA:%f,%f,%f\n", 
+               (double)raw_vel,             // 1. Skutečná fyzická rychlost (např. těch 39)
+               (double)m->shaft_velocity,   // 2. To, co vidí regulátor (zřejmě 0)
+               (double)(m->current_sp * 10.0f)); // 3. Akce regulátoru
     }
 }
 
@@ -226,12 +226,30 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
                                           HAPTIC_CURRENT_LPF_CUTOFF_HZ);
 
         /* ADDED: reduce Ki to avoid integrator windup during testing */
-        motor.pid_current_q.i = 5.0f;
-        motor.pid_current_d.i = 5.0f;
+        motor.pid_current_q.i = 20.0f; // Trochu oživíme vnitřní smyčku
+        motor.pid_current_d.i = 20.0f;
         
         /* ADDED: Significant P gain to get a strong response for testing */
-        motor.pid_current_q.p = 0.005f; 
-        motor.pid_current_d.p = 0.005f;
+        motor.pid_current_q.p = 0.02f; // Zrychlíme reakci na požadavek
+        motor.pid_current_d.p = 0.02f;
+
+        // ------------- NOVÉ: RYCHLOSTNÍ SMYČKA -------------
+        motor.pid_velocity.p = 0.02f;     // Mírně silnější reakce
+        motor.pid_velocity.i = 0.2f;      
+        motor.pid_velocity.limit = 0.25f; // Povolíme mu víc svalů na překonání zubu
+        
+        /* Low-pass filtr pro vyhlazení brutálního šumu ze senzoru */
+        motor.lpf_velocity.tf = 0.05f;    // Silnější filtrace šumu
+        motor.lpf_velocity.Ts = 0.01f;    // OPRAVA 1: Natvrdo nastavíme časový krok (100 Hz = 10 ms)
+        
+        /* Změna řídicího režimu: Vnější je rychlost, vnitřní je proud */
+        motor.controller = VELOCITY; 
+        motor.torque_controller = FOC_CURRENT;
+
+        /* OPRAVA 2: Natvrdo vnutíme směr, aby násobič rychlosti nebyl nula! */
+        motor.sensor_direction = DIR_CW;  // (Pokud se točí špatně, změníme na DIR_CCW)
+        // ---------------------------------------------------
+
         #if FOC_DO_CALIBRATION
             bldc_motor_align_current_sense(&motor);
         #else
