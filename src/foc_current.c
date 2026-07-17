@@ -3,6 +3,7 @@
  * Standalone application for testing closed-loop current FOC control.
  */
 
+#include <zephyr/sys/printk.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/init.h>
@@ -48,7 +49,7 @@ static int foc_power_rails_and_mute_oled(void)
 }
 SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 
-#define FOC_DO_CALIBRATION 0
+#define FOC_DO_CALIBRATION 1
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
@@ -65,7 +66,7 @@ SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 /* Current loop tuning */
 #define HAPTIC_CURRENT_LOOP_BW_HZ    15.0f  /* Hz; | 2 % of the foc loop frequency */
 #define HAPTIC_CURRENT_LPF_CUTOFF_HZ HAPTIC_CURRENT_LOOP_BW_HZ*3.3f /* Hz; from SimpleFOC docs | 5.0 -> 3.3*/
-#define HAPTIC_CURRENT_LIMIT         0.25f  /* A, hard clamp on q-current setpoint for safe bring-up */
+#define HAPTIC_CURRENT_LIMIT         0.5f  /* A, hard clamp on q-current setpoint for safe bring-up */
 
 /* Global hardware instances for this standalone test */
 static struct tmag5170_device encoder;
@@ -113,6 +114,18 @@ static void haptic_loop(bldc_motor_t *m)
     /* 2. Send to FOC algorithm */
     bldc_motor_move(m, target_current_amps);
     bldc_motor_loop_foc(m);
+
+/* --- Sonda stavu smyčky --- */
+    static int log_counter = 0;
+    if (++log_counter >= 5000) { 
+        log_counter = 0;
+        float actual_iq = m->current.q;
+        float output_uq = m->voltage.q;
+        float mech_angle = sensor_get_angle(m->sensor);
+        
+        printk("Target: %.2fA | Iq: %.3fA | Uq: %.3fV | Mech_Ang: %.2f\n", 
+                (double)target_current_amps, (double)actual_iq, (double)output_uq, (double)mech_angle);
+    }
 }
 
 /**
@@ -155,9 +168,9 @@ static int standalone_haptic_init(void)
     bldc_motor_link_sensor(&motor, (sensor_t *)&encoder);
 
     /* Set voltage limits (0.58 margin is required for SVPWM without saturation) */
-    motor.voltage_limit = HAPTIC_VOLTAGE_LIMIT * 0.58f; 
+    motor.voltage_limit = HAPTIC_VOLTAGE_LIMIT*0.58f; // 0.58 margin is required for SVPWM without saturation
     motor.velocity_limit = 20.0f;
-    motor.voltage_sensor_align = motor.voltage_limit; /* ALWAYS calibrate with max voltage to overcome cogging */
+    motor.voltage_sensor_align = SUPPLY_VOLTAGE; /* ALWAYS calibrate with max voltage to overcome cogging */
     bldc_motor_init(&motor);
 
     /* 4. Run FOC calibration or set fixed values */
@@ -172,51 +185,11 @@ static int standalone_haptic_init(void)
     bldc_motor_init_foc(&motor);
     LOG_INF("  [OK] FOC calibration complete!");
 #else
-LOG_INF("4. Running BULLETPROOF diagnostic alignment...");
-    
-    /* 1. Jemná rampa napětí k D-ose (bez kmitání a zvonového efektu) */
-    float align_voltage = 2.0f;
-    for (int i = 0; i <= 100; i++) {
-        float v = align_voltage * (float)i / 100.0f;
-        /* SimpleFOC historicky zarovnává posláním Uq=V na 270 stupňů (4.712 rad) */
-        bldc_motor_set_phase_voltage(&motor, v, 0.0f, 4.71239f);
-        k_msleep(2);
-    }
-    LOG_INF("Rotor uzamčen. Čekám 1 sekundu na naprosté fyzické uklidnění...");
-    k_msleep(1000);
-
-    /* 2. Změření absolutně přesné nuly */
-    sensor_update(motor.sensor);
-    float true_zero = bldc_motor_electrical_angle(&motor);
-    float start_mech = sensor_get_angle(motor.sensor);
-    LOG_INF(">>> SKUTEČNÝ NULOVÝ ÚHEL: %.4f <<<", (double)true_zero);
-
-    /* 3. Zjištění směru (DIR_CW vs DIR_CCW) */
-    LOG_INF("Aplikuji jemný tah vpřed pro zjištění polarity senzoru...");
-    /* Pošleme napětí pod skutečným úhlem, což motor donutí popojet vpřed */
-    bldc_motor_set_phase_voltage(&motor, align_voltage, 0.0f, true_zero);
-    k_msleep(400); /* Necháme hřídel fyzicky pootočit */
-
-    sensor_update(motor.sensor);
-    float end_mech = sensor_get_angle(motor.sensor);
-    
-    /* Ochrana proti přetočení přes 360 stupňů (wrap-around) */
-    float diff = end_mech - start_mech;
-    if (diff > 3.14159f) diff -= 6.28318f;
-    if (diff < -3.14159f) diff += 6.28318f;
-    
-    int detected_dir = (diff > 0.0f) ? DIR_CW : DIR_CCW;
-    LOG_INF(">>> DETEKOVANÝ SMĚR SENZORU: %s <<<", detected_dir == DIR_CW ? "DIR_CW" : "DIR_CCW");
-
-    /* Vypnutí motoru */
-    bldc_motor_set_phase_voltage(&motor, 0.0f, 0.0f, 0.0f);
-    k_msleep(200);
-
-    /* 4. Aplikace dokonalých fyzikálních konstant a inicializace FOC */
-    motor.zero_electric_angle = true_zero;
-    motor.sensor_direction = detected_dir;
-    bldc_motor_init_foc(&motor);
-    LOG_INF("  [OK] FOC matematika úspěšně naplněna čistými daty!");
+LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
+    motor.sensor_direction = DIR_CCW; 
+    motor.zero_electric_angle = 3.45f;
+    bldc_motor_init_foc(&motor); 
+    LOG_INF("  [OK] FOC initialized!");
 #endif
 
     /* 5. Initialize FOC current sense (DRV8311H CSA via SAADC) */
@@ -252,10 +225,17 @@ LOG_INF("4. Running BULLETPROOF diagnostic alignment...");
                                           (float)HAPTIC_LOOP_HZ, 
                                           HAPTIC_CURRENT_LPF_CUTOFF_HZ);
 
+        /* ADDED: reduce Ki to avoid integrator windup during testing */
+        motor.pid_current_q.i = 5.0f;
+        motor.pid_current_d.i = 5.0f;
+        
+        /* ADDED: Significant P gain to get a strong response for testing */
+        motor.pid_current_q.p = 0.005f; 
+        motor.pid_current_d.p = 0.005f;
         #if FOC_DO_CALIBRATION
             bldc_motor_align_current_sense(&motor);
         #else
-            current_sense_set_gain_sign(1.0f);
+            current_sense_set_gain_sign(-1.0f);
         #endif
         /* FORCE CLOSED LOOP CURRENT MODE */
         motor.torque_controller = FOC_CURRENT;
