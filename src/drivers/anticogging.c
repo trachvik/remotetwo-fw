@@ -3,6 +3,18 @@
  * Iterative Anticogging Calibration algorithm.
  */
 
+
+/* TO DO - hardware change to the magnet mount?
+ * try to reduce this phenomenon by perfecting this alghorithm? (more iterations? finer error_treshold? )
+ */
+
+ /* TESTING:
+  * try to run the motor with higher velocity before and after?
+  * measure the noise with and without anticogging?
+  * 
+ */
+
+
 #include "anticogging.h"
 #include "drivers/bldc_motor.h"
 #include <zephyr/logging/log.h>
@@ -11,7 +23,7 @@
 
 LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 
-#define SAMPLE_COUNT 200
+#define SAMPLE_COUNT 500
 #define TWO_PI 6.28318530718f
 #define CALIB_SPEED_RAD_S 3.14159f
 #define CALIB_REVOLUTIONS 3

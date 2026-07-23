@@ -241,12 +241,12 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
         motor.pid_current_d.p = 0.02f;
 
         // ------------- NOVÉ: RYCHLOSTNÍ SMYČKA -------------
-        motor.pid_velocity.p = 0.02f;     // Mírně silnější reakce
+        motor.pid_velocity.p = 0.01f;     // Mírně silnější reakce
         motor.pid_velocity.i = 0.2f;      
         motor.pid_velocity.limit = 0.25f; // Povolíme mu víc svalů na překonání zubu
         
         /* Low-pass filtr pro vyhlazení brutálního šumu ze senzoru */
-        motor.lpf_velocity.tf = 0.05f;    // Silnější filtrace šumu
+        motor.lpf_velocity.tf = 0.015f;    // Silnější filtrace šumu
         motor.lpf_velocity.Ts = 0.01f;    // OPRAVA 1: Natvrdo nastavíme časový krok (100 Hz = 10 ms)
         
         /* Změna řídicího režimu: Vnější je rychlost, vnitřní je proud */
