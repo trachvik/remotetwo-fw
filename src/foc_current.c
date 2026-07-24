@@ -51,6 +51,7 @@ static int foc_power_rails_and_mute_oled(void)
 SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 
 #define FOC_DO_CALIBRATION 1
+#define ANTICOGGING_COMPENSATION 0 // whether to use the anticogging map for feedforward compensation in velocity control loop
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
@@ -107,11 +108,15 @@ static void haptic_loop(bldc_motor_t *m)
         float target_velocity_rad_s = 6.283f; 
         bldc_motor_move(m, target_velocity_rad_s);
     }
+    
+    /* Uložíme čistou hodnotu z PIDu pro diagnostiku/logování */
+    float original_sp = m->current_sp; 
 
-    /* 3. ANTICOGGING INJEKCE */
-    float ff = anticogging_get_feedforward(sensor_get_angle(m->sensor));
-    float original_sp = m->current_sp; /* Uložíme čistou hodnotu z PIDu */
-    m->current_sp += ff;               /* Přidáme mapu na překonání zubu */
+    #if ANTICOGGING_COMPENSATION
+        /* 3. ANTICOGGING INJEKCE */
+        float ff = anticogging_get_feedforward(sensor_get_angle(m->sensor));
+        m->current_sp += ff; 
+    #endif
 
     /* 4. PROUDOVÁ SMYČKA */
     bldc_motor_loop_foc(m);
