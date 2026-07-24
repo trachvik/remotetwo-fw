@@ -58,6 +58,8 @@ static const struct spi_dt_spec g_tmag_spi =
 			0);
 
 static float   g_cached_angle_rad  = 0.0f;   /* raw CORDIC angle, rad [0,2pi) */
+static float   g_cached_bx_mt      = 0.0f;   /* latest X field component [mT] */
+static float   g_cached_by_mt      = 0.0f;   /* latest Y field component [mT] */
 static int64_t g_last_update_us    = 0;
 
 /* ---- Angle tracking observer (type-II PLL) -----------------------------
@@ -194,7 +196,7 @@ void sensor_update(sensor_t *sensor)
 	g_last_update_us = now_us;
 
 	const struct device *tmag = DEVICE_DT_GET(DT_NODELABEL(tmag5170));
-	struct sensor_value val;
+	struct sensor_value val, bx, by;
 	int ret;
 
 	ret = sensor_sample_fetch(tmag);
@@ -207,6 +209,16 @@ void sensor_update(sensor_t *sensor)
 	if (ret != 0) {
 		LOG_ERR("TMAG channel_get failed: %d", ret);
 		return;
+	}
+
+	ret = sensor_channel_get(tmag, SENSOR_CHAN_MAGN_X, &bx);
+	if (ret == 0) {
+		g_cached_bx_mt = (float)(sensor_value_to_double(&bx) / 10.0);
+	}
+
+	ret = sensor_channel_get(tmag, SENSOR_CHAN_MAGN_Y, &by);
+	if (ret == 0) {
+		g_cached_by_mt = (float)(sensor_value_to_double(&by) / 10.0);
 	}
 
 	double deg = sensor_value_to_double(&val);
@@ -251,6 +263,18 @@ float sensor_get_velocity(sensor_t *sensor)
 	ARG_UNUSED(sensor);
 	/* Clean observer velocity (rad/s) for haptic damping. */
 	return g_pll_omega;
+}
+
+float sensor_get_bx_mt(sensor_t *sensor)
+{
+	ARG_UNUSED(sensor);
+	return g_cached_bx_mt;
+}
+
+float sensor_get_by_mt(sensor_t *sensor)
+{
+	ARG_UNUSED(sensor);
+	return g_cached_by_mt;
 }
 
 bool sensor_needs_search(sensor_t *sensor)

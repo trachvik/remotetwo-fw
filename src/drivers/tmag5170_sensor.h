@@ -56,6 +56,12 @@ float sensor_get_angle(sensor_t *sensor);
 /** Return instantaneous velocity [rad/s] (stub, returns 0). */
 float sensor_get_velocity(sensor_t *sensor);
 
+/** Return latest cached X magnetic field component [mT]. */
+float sensor_get_bx_mt(sensor_t *sensor);
+
+/** Return latest cached Y magnetic field component [mT]. */
+float sensor_get_by_mt(sensor_t *sensor);
+
 /** Absolute encoder – no index search required. */
 bool sensor_needs_search(sensor_t *sensor);
 

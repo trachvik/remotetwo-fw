@@ -629,19 +629,46 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
 
     /* ---- Zero electric angle offset (only if unknown) ---- */
     if (!_ISSET(motor->zero_electric_angle)) {
-        /* Align the electrical phases of the motor and sensor:
-         * set angle -90 deg (270 = 3*PI/2). */
+        LOG_INF("MOT: Aligning zero electric angle (Dithering & Averaging)...");
+
+        /* 1. Hrubé uzamčení: Nastavíme úhel -90 deg (3*PI/2) a počkáme na prvotní usazení */
         bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2);
-        k_msleep(700);
-        /* Read the sensor. */
-        sensor_update(motor->sensor);
-        /* Get the current zero electric angle. */
-        motor->zero_electric_angle = 0.0f;
-        motor->zero_electric_angle = bldc_motor_electrical_angle(motor);
-        k_msleep(20);
+        k_msleep(300);
+
+        /* 2. Elektronické "cvrnknutí" (Dithering) pro překonání statického tření ložisek.
+         * Střídavě vychylujeme magnetické pole do stran a amplitudu postupně zmenšujeme. 
+         * Rotor se díky tomu dokonale setřese do absolutního středu. */
+        float wiggle_amp = 0.35f; /* Počáteční výkyv cca 20 elektrických stupňů */
+        for (int w = 0; w < 10; w++) {
+            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2 + wiggle_amp);
+            k_msleep(15);
+            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2 - wiggle_amp);
+            k_msleep(15);
+            wiggle_amp *= 0.6f; /* Postupné tlumení kmitů na nulu */
+        }
+
+        /* 3. Návrat přesně na střed a čas na finální zklidnění mechaniky */
+        bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2);
+        k_msleep(300);
+
+        /* 4. Oversampling (Průměrování měření) pro vyhlazení šumu senzoru */
+        motor->zero_electric_angle = 0.0f; /* Reset před výpočtem */
+        float angle_sum = 0.0f;
+        int num_samples = 16;
+
+        for (int s = 0; s < num_samples; s++) {
+            sensor_update(motor->sensor);
+            angle_sum += bldc_motor_electrical_angle(motor);
+            k_msleep(2); /* Velmi krátká pauza mezi vzorky */
+        }
+        
+        /* Uložení finálního, zprůměrovaného a mechanicky přesného úhlu */
+        motor->zero_electric_angle = angle_sum / (float)num_samples;
+
         /* Stop everything. */
         bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
         k_msleep(200);
+        
         LOG_INF("MOT: Zero elec. angle: %.3f", (double)motor->zero_electric_angle);
     } else {
         LOG_INF("MOT: Skip offset calib.");

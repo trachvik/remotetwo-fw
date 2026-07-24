@@ -124,11 +124,16 @@ static void haptic_loop(bldc_motor_t *m)
     if (++log_counter >= 50) { 
         log_counter = 0;
         float raw_vel = sensor_get_velocity(m->sensor);
-        
-        printk("DATA:%f,%f,%f\n", 
-               (double)raw_vel,             
-               (double)m->shaft_velocity,   
-               (double)(original_sp * 10.0f)); 
+        float bx_mt = sensor_get_bx_mt(m->sensor);
+        float by_mt = sensor_get_by_mt(m->sensor);
+    
+        printk("DATA:%f,%f,%f,%f,%f\n", 
+            (double)raw_vel,             
+            (double)m->shaft_velocity,   
+            (double)(original_sp * 10.0f),
+            (double)bx_mt,
+            (double)by_mt); 
+ 
                /* Vykreslujeme original_sp! V SerialPlotu byste měl vidět, jak se 
                 * zelená vlna postupně zmenšuje a rovná k nule, protože se o překonávání 
                 * zubů už nestará regulátor, ale mapa (ff). */
