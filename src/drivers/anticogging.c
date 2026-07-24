@@ -4,17 +4,6 @@
  */
 
 
-/* TO DO - hardware change to the magnet mount?
- * try to reduce this phenomenon by perfecting this alghorithm? (more iterations? finer error_treshold? )
- */
-
- /* TESTING:
-  * try to run the motor with higher velocity before and after?
-  * measure the noise with and without anticogging?
-  * 
- */
-
-
 #include "anticogging.h"
 #include "drivers/bldc_motor.h"
 #include <zephyr/logging/log.h>
@@ -33,8 +22,8 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 
 static float final_lut[SAMPLE_COUNT] = {0};
 
-/* --- BEZPEČNÁ MATEMATIKA ---
- * Chrání před HardFaultem, NaN hodnotami a nekonečnými smyčkami. */
+/* --- SAFE MATH ---
+ * Protects against HardFault, NaN values, and infinite loops. */
 static inline int get_lut_index(float mechanical_angle) {
     if (isnan(mechanical_angle) || isinf(mechanical_angle)) {
         return 0;
@@ -47,7 +36,7 @@ static inline int get_lut_index(float mechanical_angle) {
     
     int index = (int)((norm_angle / TWO_PI) * SAMPLE_COUNT);
     
-    /* Tvrdé záchranné limity */
+    /* Hard safety limits */
     if (index < 0) index = 0;
     if (index >= SAMPLE_COUNT) index = SAMPLE_COUNT - 1;
     
@@ -72,12 +61,12 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
     uint32_t stabilize_ticks = (uint32_t)(2.0f * 5000.0f); 
     int move_divider = 0;
     
-    printk("---> [DEBUG B] Zacinam fazi stabilizace, cekam na FOC timer...\n");
+    //printk("---> [DEBUG B] Starting stabilization phase, waiting for FOC timer...\n");
 
     for(uint32_t i = 0; i < stabilize_ticks; i++) {
         k_sem_take(foc_sem, K_FOREVER);
         
-        if (i == 0) printk("---> [DEBUG C] Prvni tick prijat! Aktualizuji senzor...\n");
+        //if (i == 0) printk("---> [DEBUG C] First tick received! Updating sensor...\n");
         sensor_update(motor->sensor);
         
         if (++move_divider >= 50) {
@@ -85,24 +74,24 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
             bldc_motor_move(motor, target_speed);
         }
         
-        if (i == 0) printk("---> [DEBUG D] Pocitam feedforward...\n");
+        //if (i == 0) printk("---> [DEBUG D] Calculating feedforward...\n");
         float angle = sensor_get_angle(motor->sensor);
         float ff = anticogging_get_feedforward(angle);
         
         float original_sp = motor->current_sp;
         motor->current_sp += ff; 
         
-        if (i == 0) printk("---> [DEBUG E] Spoustim vnitrni FOC smycku...\n");
+        //if (i == 0) printk("---> [DEBUG E] Starting inner FOC loop...\n");
         bldc_motor_loop_foc(motor);
         
         motor->current_sp = original_sp; 
 
-        if (i == 0) printk("---> [DEBUG F] Prvni FOC krok uspesny! Roztoce se...\n");
+        //if (i == 0) printk("---> [DEBUG F] First FOC step successful! Spinning up...\n");
     }
 
-    printk("---> [DEBUG G] Stabilizace dokoncena, sber dat...\n");
+    //printk("---> [DEBUG G] Stabilization complete, collecting data...\n");
 
-    /* 2. Fáze sběru dat */
+    /* 2. Data collection phase */
     float time_needed_s = (CALIB_REVOLUTIONS * TWO_PI) / fabs(target_speed);
     uint32_t calib_ticks = (uint32_t)(time_needed_s * 5000.0f);
 
@@ -142,7 +131,7 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
 
 void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem) 
 {
-    printk("---> [DEBUG A] Vstoupil jsem zive do anticogging_calibrate!\n");
+    //printk("---> [DEBUG A] Entered anticogging_calibrate live!\n");
 
     static float lut_cw[SAMPLE_COUNT];
     static float lut_ccw[SAMPLE_COUNT];

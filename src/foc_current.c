@@ -51,7 +51,7 @@ static int foc_power_rails_and_mute_oled(void)
 SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 
 #define FOC_DO_CALIBRATION 1
-#define ANTICOGGING_COMPENSATION 0 // whether to use the anticogging map for feedforward compensation in velocity control loop
+#define ANTICOGGING_COMPENSATION 1 // whether to use the anticogging map for feedforward compensation in velocity control loop
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
@@ -101,7 +101,7 @@ static void haptic_loop(bldc_motor_t *m)
     /* 1. Update sensor */
     sensor_update(m->sensor);
 
-    /* 2. RYCHLOSTNÍ SMYČKA - DOWNSAMPLING na 100 Hz */
+    /* 2. VELOCITY LOOP - DOWNSAMPLING to 100 Hz */
     static int move_divider = 0;
     if (++move_divider >= 50) { 
         move_divider = 0;
@@ -109,22 +109,38 @@ static void haptic_loop(bldc_motor_t *m)
         bldc_motor_move(m, target_velocity_rad_s);
     }
     
-    /* Uložíme čistou hodnotu z PIDu pro diagnostiku/logování */
+    /* Save the pure PID value for diagnostics/logging */
     float original_sp = m->current_sp; 
 
     #if ANTICOGGING_COMPENSATION
-        /* 3. ANTICOGGING INJEKCE */
-        float ff = anticogging_get_feedforward(sensor_get_angle(m->sensor));
-        m->current_sp += ff; 
+        /* 3. ANTICOGGING INJECTION WITH FADE-OUT */
+        float raw_ff = anticogging_get_feedforward(sensor_get_angle(m->sensor));
+        
+        /* Absolute value of the current rotor velocity */
+        float abs_vel = (m->shaft_velocity < 0.0f) ? -m->shaft_velocity : m->shaft_velocity;
+        float fade_factor = 1.0f;
+        
+        /* Start fading out at 1.5 rad/s, disable completely at 3.0 rad/s */
+        float fade_start = 1.5f; 
+        float fade_end = 3.0f;
+        
+        if (abs_vel >= fade_end) {
+            fade_factor = 0.0f;
+        } else if (abs_vel > fade_start) {
+            /* Linear fade-out from 1.0 to 0.0 */
+            fade_factor = 1.0f - ((abs_vel - fade_start) / (fade_end - fade_start));
+        }
+        
+        m->current_sp += (raw_ff * fade_factor); 
     #endif
 
-    /* 4. PROUDOVÁ SMYČKA */
+    /* 4. CURRENT LOOP */
     bldc_motor_loop_foc(m);
 
-    /* Obnovíme čistou PID hodnotu, aby se nezapsala zpět do struktury */
+    /* Restore the pure PID value so it doesn't get written back into the structure */
     m->current_sp = original_sp; 
 
-    /* --- SERIALPLOT LOGOVÁNÍ (100 Hz) --- */
+    /* --- SERIALPLOT LOGGING (100 Hz) --- */
     static int log_counter = 0;
     if (++log_counter >= 50) { 
         log_counter = 0;
@@ -139,9 +155,9 @@ static void haptic_loop(bldc_motor_t *m)
             (double)bx_mt,
             (double)by_mt); 
  
-               /* Vykreslujeme original_sp! V SerialPlotu byste měl vidět, jak se 
-                * zelená vlna postupně zmenšuje a rovná k nule, protože se o překonávání 
-                * zubů už nestará regulátor, ale mapa (ff). */
+               /* Plotting original_sp! In SerialPlot, you should see the 
+                * green wave gradually shrinking to zero, as the mapping (ff) 
+                * takes over overcoming the cogging instead of the controller. */
     }
 }
 
@@ -243,28 +259,33 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
                                           HAPTIC_CURRENT_LPF_CUTOFF_HZ);
 
         /* ADDED: reduce Ki to avoid integrator windup during testing */
-        motor.pid_current_q.i = 20.0f; // Trochu oživíme vnitřní smyčku
+        motor.pid_current_q.i = 20.0f; // Slightly liven up the inner loop
         motor.pid_current_d.i = 20.0f;
         
         /* ADDED: Significant P gain to get a strong response for testing */
-        motor.pid_current_q.p = 0.02f; // Zrychlíme reakci na požadavek
+        motor.pid_current_q.p = 0.02f; // Speed up response to setpoint
         motor.pid_current_d.p = 0.02f;
 
-        // ------------- NOVÉ: RYCHLOSTNÍ SMYČKA -------------
-        motor.pid_velocity.p = 0.01f;     // Mírně silnější reakce
+        // ------------- NEW: VELOCITY LOOP -------------
+        /* DIAGNOSTICS NOTE: 
+         * Controller parameters (P=0.01) and filter (tf=0.015) were adjusted 
+         * for anticogging needs. The uncompensated run graph therefore has a 
+         * different shape (sharper and softer) than in older versions, which is 
+         * desirable for better visibility of real hardware anomalies. */
+        motor.pid_velocity.p = 0.01f;     // Slightly stronger response
         motor.pid_velocity.i = 0.2f;      
-        motor.pid_velocity.limit = 0.25f; // Povolíme mu víc svalů na překonání zubu
+        motor.pid_velocity.limit = 0.25f; // Allow more effort to overcome the cogging tooth
         
-        /* Low-pass filtr pro vyhlazení brutálního šumu ze senzoru */
-        motor.lpf_velocity.tf = 0.015f;    // Silnější filtrace šumu
-        motor.lpf_velocity.Ts = 0.01f;    // OPRAVA 1: Natvrdo nastavíme časový krok (100 Hz = 10 ms)
+        /* Low-pass filter to smooth out heavy sensor noise */
+        motor.lpf_velocity.tf = 0.015f;    // Stronger noise filtering
+        motor.lpf_velocity.Ts = 0.01f;    // FIX 1: Hardcode the time step (100 Hz = 10 ms)
         
-        /* Změna řídicího režimu: Vnější je rychlost, vnitřní je proud */
+        /* Control mode change: Outer is velocity, inner is current */
         motor.controller = VELOCITY; 
         motor.torque_controller = FOC_CURRENT;
 
-        /* OPRAVA 2: Natvrdo vnutíme směr, aby násobič rychlosti nebyl nula! */
-        motor.sensor_direction = DIR_CW;  // (Pokud se točí špatně, změníme na DIR_CCW)
+        /* FIX 2: Hardcode the direction so the velocity multiplier isn't zero! */
+        motor.sensor_direction = DIR_CW;  // (If it spins the wrong way, change to DIR_CCW)
         // ---------------------------------------------------
 
         #if FOC_DO_CALIBRATION
@@ -280,16 +301,16 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
         return -1; /* Stop execution if ADC is dead, no point in continuing */
     }
 
-    printk("---> [DEBUG 2] Spoustim 5kHz casovac...\n");
+    //printk("---> [DEBUG 2] Starting 5kHz timer...\n");
     k_timer_init(&haptic_timer, haptic_timer_cb, NULL);
     k_timer_start(&haptic_timer, K_USEC(1000000U / HAPTIC_LOOP_HZ), K_USEC(1000000U / HAPTIC_LOOP_HZ));
 
-    printk("---> [DEBUG 3] Jdu volat kalibraci...\n");
-    k_msleep(10); /* Dáme procesoru 10 ms pauzu, aby si srovnal dech */
+    //printk("---> [DEBUG 3] Calling calibration...\n");
+    k_msleep(10); /* Give the processor a 10 ms pause to catch its breath */
 
     anticogging_calibrate(&motor, &haptic_sem);
 
-    printk("---> [DEBUG 4] Kalibrace hotova, vytvarim vlakno...\n");
+    //printk("---> [DEBUG 4] Calibration done, creating thread...\n");
     
     k_thread_create(&haptic_thread_data, haptic_stack, K_THREAD_STACK_SIZEOF(haptic_stack),
                     haptic_thread_fn, NULL, NULL, NULL, HAPTIC_THREAD_PRIORITY, K_FP_REGS, K_NO_WAIT);

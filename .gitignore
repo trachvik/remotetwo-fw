@@ -2,6 +2,7 @@
 build*/
 _build/
 docs/
+scripts/
 
 # Ignore CMake build files
 .ninja_deps
