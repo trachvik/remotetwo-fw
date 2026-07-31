@@ -3,12 +3,17 @@
  * Iterative Anticogging Calibration algorithm.
  */
 
-
 #include "anticogging.h"
 #include "drivers/bldc_motor.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
 #include <math.h>
+
+/* =========================================================================
+ * OPRAVA CHYBY KOMPILÁTORU (ABI Mismatch):
+ * ========================================================================= */
+extern float sensor_get_angle(void *sensor);
+extern void sensor_update(void *sensor);
 
 LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 
@@ -61,12 +66,10 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
     uint32_t stabilize_ticks = (uint32_t)(2.0f * 5000.0f); 
     int move_divider = 0;
     
-    //printk("---> [DEBUG B] Starting stabilization phase, waiting for FOC timer...\n");
+    printk("     -> Stabilizacni faze (2s)...\n");
 
     for(uint32_t i = 0; i < stabilize_ticks; i++) {
         k_sem_take(foc_sem, K_FOREVER);
-        
-        //if (i == 0) printk("---> [DEBUG C] First tick received! Updating sensor...\n");
         sensor_update(motor->sensor);
         
         if (++move_divider >= 50) {
@@ -74,22 +77,23 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
             bldc_motor_move(motor, target_speed);
         }
         
-        //if (i == 0) printk("---> [DEBUG D] Calculating feedforward...\n");
         float angle = sensor_get_angle(motor->sensor);
         float ff = anticogging_get_feedforward(angle);
         
         float original_sp = motor->current_sp;
         motor->current_sp += ff; 
         
-        //if (i == 0) printk("---> [DEBUG E] Starting inner FOC loop...\n");
         bldc_motor_loop_foc(motor);
         
         motor->current_sp = original_sp; 
 
-        //if (i == 0) printk("---> [DEBUG F] First FOC step successful! Spinning up...\n");
+        /* LOGOVANI STABILIZACE (1 Hz) */
+        if (i % 5000 == 0) {
+            printk("       [1s STATUS] Stabilizace | Aktualni uhel: %8.4f rad\n", (double)angle);
+        }
     }
 
-    //printk("---> [DEBUG G] Stabilization complete, collecting data...\n");
+    printk("     -> Sber dat spusteni...\n");
 
     /* 2. Data collection phase */
     float time_needed_s = (CALIB_REVOLUTIONS * TWO_PI) / fabs(target_speed);
@@ -115,6 +119,12 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
         int index = get_lut_index(angle);
         temp_sum[index] += original_sp;
         temp_count[index]++;
+
+        /* LOGOVANI SBERU DAT (1 Hz) */
+        if (i % 5000 == 0) {
+            printk("       [1s STATUS] Sber dat | Uhel: %8.4f rad | Zapisuji do indexu: [%3d/%d] | Proud z PID: %6.3f A\n", 
+                   (double)angle, index, SAMPLE_COUNT, (double)original_sp);
+        }
     }
 
     bldc_motor_move(motor, 0.0f);
@@ -131,14 +141,14 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
 
 void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem) 
 {
-    //printk("---> [DEBUG A] Entered anticogging_calibrate live!\n");
-
     static float lut_cw[SAMPLE_COUNT];
     static float lut_ccw[SAMPLE_COUNT];
 
     for (int i = 0; i < SAMPLE_COUNT; i++) {
         final_lut[i] = 0.0f;
     }
+    
+    printk("---> PUVODNI ITERATIVNI KALIBRACE START\n");
 
     for (int iter = 1; iter <= MAX_ITERATIONS; iter++) {
         printk("---> ITERATION %d / %d ---\n", iter, MAX_ITERATIONS);
@@ -170,4 +180,11 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     }
 
     printk("---> CALIBRATION COMPLETED ---\n");
+
+    printk("=== START LUT DUMP ===\n");
+    printk("Index,Current_A\n");
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        printk("%d,%f\n", i, (double)final_lut[i]);
+    }
+    printk("=== END LUT DUMP ===\n");
 }
