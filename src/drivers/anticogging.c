@@ -19,7 +19,7 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 #define CALIB_SPEED_RAD_S 3.14159f
 #define CALIB_REVOLUTIONS 3
 #define MAX_ITERATIONS 5
-#define RELAXATION_GAIN 0.7f
+#define RELAXATION_GAIN 0.5f
 #define ERROR_THRESHOLD 0.005f 
 
 static float final_lut[SAMPLE_COUNT] = {0};
@@ -33,6 +33,11 @@ float anticogging_get_feedforward(float mechanical_angle)
     
     float float_index = (norm_angle / TWO_PI) * (float)SAMPLE_COUNT;
     int idx1 = (int)float_index;
+    
+    /* BEZPEČNOST: Ochrana proti přetečení indexu na hranici otáčky */
+    if (idx1 >= SAMPLE_COUNT) idx1 = SAMPLE_COUNT - 1;
+    if (idx1 < 0) idx1 = 0;
+    
     int idx2 = (idx1 + 1) % SAMPLE_COUNT; 
     float fraction = float_index - (float)idx1;
     
@@ -56,7 +61,7 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
         k_sem_take(foc_sem, K_FOREVER);
         sensor_update(motor->sensor);
         
-        if (++move_divider >= 50) {
+        if (++move_divider >= 5) { // 1000 Hz update for motion control
             move_divider = 0;
             bldc_motor_move(motor, target_speed);
         }
@@ -75,7 +80,7 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
         k_sem_take(foc_sem, K_FOREVER);
         sensor_update(motor->sensor);
         
-        if (++move_divider >= 50) {
+        if (++move_divider >= 5) { // 1000 Hz update for motion control
             move_divider = 0;
             bldc_motor_move(motor, target_speed);
         }
@@ -132,15 +137,11 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     float saved_v_limit = motor->pid_velocity.limit;
     float saved_c_limit = motor->current_limit;
 
-    /* =========================================================================
-     * 2. OPRAVA SÍLY A OSCILACÍ: "Tvrdá pružina" (Stiff Position Loop)
-     * ========================================================================= */
-    /* P=0.25 vyvine velkou sílu k proražení zubu (až 0.78A při nulové rychlosti).
-       I=0.02 zabrání "visení" na statickém tření, ale nezpůsobí wind-up výstřely. */
-    motor->pid_velocity.p = 0.25f;       
-    motor->pid_velocity.i = 0.02f;        
+    /* OPRAVA: Návrat k "měkké gumě" bez Integrator Windup efektu */
+    motor->pid_velocity.p = 0.05f;       /* Hladké obkreslení zubů (žádné kmitání) */
+    motor->pid_velocity.i = 0.02f;       /* Miniaturní I-složka jen proti zastavení na tření */
     motor->pid_velocity.limit = 1.0f;    
-    motor->current_limit = 1.0f;         
+    motor->current_limit = 1.0f;     
 
     for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = 0.0f;
     
