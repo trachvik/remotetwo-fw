@@ -1,6 +1,6 @@
 /*
  * anticogging.c
- * Iterative Anticogging Calibration algorithm.
+ * Optimalizovany Iterative Anticogging Calibration algorithm (s interpolaci a filtrovanim).
  */
 
 #include "anticogging.h"
@@ -9,9 +9,7 @@
 #include <zephyr/sys/printk.h>
 #include <math.h>
 
-/* =========================================================================
- * OPRAVA CHYBY KOMPILÁTORU (ABI Mismatch):
- * ========================================================================= */
+/* --- OPRAVA ABI --- */
 extern float sensor_get_angle(void *sensor);
 extern void sensor_update(void *sensor);
 
@@ -27,30 +25,27 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 
 static float final_lut[SAMPLE_COUNT] = {0};
 
-/* --- SAFE MATH ---
- * Protects against HardFault, NaN values, and infinite loops. */
-static inline int get_lut_index(float mechanical_angle) {
-    if (isnan(mechanical_angle) || isinf(mechanical_angle)) {
-        return 0;
-    }
-    
-    float norm_angle = fmodf(mechanical_angle, TWO_PI);
-    if (norm_angle < 0.0f) {
-        norm_angle += TWO_PI;
-    }
-    
-    int index = (int)((norm_angle / TWO_PI) * SAMPLE_COUNT);
-    
-    /* Hard safety limits */
-    if (index < 0) index = 0;
-    if (index >= SAMPLE_COUNT) index = SAMPLE_COUNT - 1;
-    
-    return index;
-}
-
+/* =========================================================================
+ * OPTIMALIZACE 1: LINEÁRNÍ INTERPOLACE
+ * Místo "schodů" počítá plynulý přechod mezi dvěma nejbližšími indexy v poli.
+ * ========================================================================= */
 float anticogging_get_feedforward(float mechanical_angle) 
 {
-    return final_lut[get_lut_index(mechanical_angle)];
+    if (isnan(mechanical_angle) || isinf(mechanical_angle)) return 0.0f;
+    
+    float norm_angle = fmodf(mechanical_angle, TWO_PI);
+    if (norm_angle < 0.0f) norm_angle += TWO_PI;
+    
+    /* Vypočítáme přesnou desetinnou pozici v poli */
+    float float_index = (norm_angle / TWO_PI) * (float)SAMPLE_COUNT;
+    int idx1 = (int)float_index;
+    int idx2 = (idx1 + 1) % SAMPLE_COUNT; /* Kruhové pole (přetečení 499 -> 0) */
+    
+    /* Frakce určuje, jak blízko jsme k idx2 (0.0 až 0.999) */
+    float fraction = float_index - (float)idx1;
+    
+    /* Lineární mix hodnot */
+    return final_lut[idx1] * (1.0f - fraction) + final_lut[idx2] * fraction;
 }
 
 static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_sem, float target_speed, float *output_lut) 
@@ -66,8 +61,6 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
     uint32_t stabilize_ticks = (uint32_t)(2.0f * 5000.0f); 
     int move_divider = 0;
     
-    printk("     -> Stabilizacni faze (2s)...\n");
-
     for(uint32_t i = 0; i < stabilize_ticks; i++) {
         k_sem_take(foc_sem, K_FOREVER);
         sensor_update(motor->sensor);
@@ -77,25 +70,13 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
             bldc_motor_move(motor, target_speed);
         }
         
-        float angle = sensor_get_angle(motor->sensor);
-        float ff = anticogging_get_feedforward(angle);
-        
+        float ff = anticogging_get_feedforward(sensor_get_angle(motor->sensor));
         float original_sp = motor->current_sp;
         motor->current_sp += ff; 
-        
         bldc_motor_loop_foc(motor);
-        
         motor->current_sp = original_sp; 
-
-        /* LOGOVANI STABILIZACE (1 Hz) */
-        if (i % 5000 == 0) {
-            printk("       [1s STATUS] Stabilizace | Aktualni uhel: %8.4f rad\n", (double)angle);
-        }
     }
 
-    printk("     -> Sber dat spusteni...\n");
-
-    /* 2. Data collection phase */
     float time_needed_s = (CALIB_REVOLUTIONS * TWO_PI) / fabs(target_speed);
     uint32_t calib_ticks = (uint32_t)(time_needed_s * 5000.0f);
 
@@ -116,15 +97,15 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
         bldc_motor_loop_foc(motor);
         motor->current_sp = original_sp; 
 
-        int index = get_lut_index(angle);
+        /* Zápis surových hodnot do správného chlívečku */
+        float norm_angle = fmodf(angle, TWO_PI);
+        if (norm_angle < 0.0f) norm_angle += TWO_PI;
+        int index = (int)((norm_angle / TWO_PI) * SAMPLE_COUNT);
+        if (index < 0) index = 0;
+        if (index >= SAMPLE_COUNT) index = SAMPLE_COUNT - 1;
+
         temp_sum[index] += original_sp;
         temp_count[index]++;
-
-        /* LOGOVANI SBERU DAT (1 Hz) */
-        if (i % 5000 == 0) {
-            printk("       [1s STATUS] Sber dat | Uhel: %8.4f rad | Zapisuji do indexu: [%3d/%d] | Proud z PID: %6.3f A\n", 
-                   (double)angle, index, SAMPLE_COUNT, (double)original_sp);
-        }
     }
 
     bldc_motor_move(motor, 0.0f);
@@ -143,12 +124,22 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
 {
     static float lut_cw[SAMPLE_COUNT];
     static float lut_ccw[SAMPLE_COUNT];
+    static float smoothed_lut[SAMPLE_COUNT];
 
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        final_lut[i] = 0.0f;
-    }
+    /* --- TANK MODE PID --- */
+    float saved_kp = motor->pid_velocity.p;
+    float saved_ki = motor->pid_velocity.i;
+    float saved_v_limit = motor->pid_velocity.limit;
+    float saved_c_limit = motor->current_limit;
+
+    motor->pid_velocity.p = 0.05f;       
+    motor->pid_velocity.i = 1.0f;        
+    motor->pid_velocity.limit = 0.8f;    
+    motor->current_limit = 0.8f;         
+
+    for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = 0.0f;
     
-    printk("---> PUVODNI ITERATIVNI KALIBRACE START\n");
+    printk("---> ANTICOGGING CALIBRATION START\n");
 
     for (int iter = 1; iter <= MAX_ITERATIONS; iter++) {
         printk("---> ITERATION %d / %d ---\n", iter, MAX_ITERATIONS);
@@ -161,6 +152,7 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         float sum_residual_error = 0.0f;
 
         for (int i = 0; i < SAMPLE_COUNT; i++) {
+            /* Průměr obou směrů vyruší asymetrické tření ložisek */
             float avg_residual = (lut_cw[i] + lut_ccw[i]) / 2.0f;
             final_lut[i] += (avg_residual * RELAXATION_GAIN);
 
@@ -169,22 +161,45 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
             if (abs_err > max_residual_error) max_residual_error = abs_err;
         }
 
-        float mean_error = sum_residual_error / SAMPLE_COUNT;
-        printk("---> End of iteration %d: Max error = %.4f A\n", iter, (double)max_residual_error);
+        /* =========================================================================
+         * OPTIMALIZACE 2: KLOUZAVÝ PRŮMĚR (Vyhlazení šumu)
+         * "Vyžehlí" LUT mapu a odstraní píkující hodnoty způsobené šumem senzoru.
+         * ========================================================================= */
+        int window = 5; 
+        int half_w = window / 2;
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            float sum = 0.0f;
+            for (int j = -half_w; j <= half_w; j++) {
+                int idx = (i + j + SAMPLE_COUNT) % SAMPLE_COUNT; // Bezpečný oběh kruhového pole
+                sum += final_lut[idx];
+            }
+            smoothed_lut[i] = sum / (float)window;
+        }
+        for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = smoothed_lut[i];
+
+        /* Logování čistého pokroku */
+        float mean_error = sum_residual_error / (float)SAMPLE_COUNT;
+        printk("     Mean residual error = %.4f A (Max spike = %.4f A)\n", (double)mean_error, (double)max_residual_error);
 
         if (max_residual_error < ERROR_THRESHOLD) {
             printk("---> Error is below threshold. Calibration finished early!\n");
             break; 
         }
-        k_msleep(1000); 
+        k_msleep(500); 
     }
 
-    printk("---> CALIBRATION COMPLETED ---\n");
+    /* --- RESTORE PID --- */
+    motor->pid_velocity.p = saved_kp;
+    motor->pid_velocity.i = saved_ki;
+    motor->pid_velocity.limit = saved_v_limit;
+    motor->current_limit = saved_c_limit;
 
+    printk("---> CALIBRATION COMPLETED ---\n");
     printk("=== START LUT DUMP ===\n");
     printk("Index,Current_A\n");
     for (int i = 0; i < SAMPLE_COUNT; i++) {
         printk("%d,%f\n", i, (double)final_lut[i]);
     }
     printk("=== END LUT DUMP ===\n");
+    k_msleep(2000);
 }
