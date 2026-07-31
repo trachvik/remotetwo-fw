@@ -620,6 +620,11 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
         if (fabsf(moved_electr - _2PI) > 0.5f) {
             LOG_WRN("MOT: PP check: fail - estimated pp: %.1f",
                     (double)(_2PI / moved));
+            
+            motor->motor_status = MOTOR_CALIB_FAILED;
+            bldc_motor_disable(motor);
+            return 0; 
+            
         } else {
             LOG_INF("MOT: PP check: OK!");
         }

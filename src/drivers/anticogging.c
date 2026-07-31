@@ -1,6 +1,6 @@
 /*
  * anticogging.c
- * Optimalizovany Iterative Anticogging Calibration algorithm (s interpolaci a filtrovanim).
+ * Final Consistent Calibration (Lerp + Single-Pass Filter)
  */
 
 #include "anticogging.h"
@@ -9,7 +9,6 @@
 #include <zephyr/sys/printk.h>
 #include <math.h>
 
-/* --- OPRAVA ABI --- */
 extern float sensor_get_angle(void *sensor);
 extern void sensor_update(void *sensor);
 
@@ -19,16 +18,12 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 #define TWO_PI 6.28318530718f
 #define CALIB_SPEED_RAD_S 3.14159f
 #define CALIB_REVOLUTIONS 3
-#define MAX_ITERATIONS 4
-#define RELAXATION_GAIN 0.8f 
+#define MAX_ITERATIONS 5
+#define RELAXATION_GAIN 0.7f
 #define ERROR_THRESHOLD 0.005f 
 
 static float final_lut[SAMPLE_COUNT] = {0};
 
-/* =========================================================================
- * OPTIMALIZACE 1: LINEÁRNÍ INTERPOLACE
- * Místo "schodů" počítá plynulý přechod mezi dvěma nejbližšími indexy v poli.
- * ========================================================================= */
 float anticogging_get_feedforward(float mechanical_angle) 
 {
     if (isnan(mechanical_angle) || isinf(mechanical_angle)) return 0.0f;
@@ -36,15 +31,11 @@ float anticogging_get_feedforward(float mechanical_angle)
     float norm_angle = fmodf(mechanical_angle, TWO_PI);
     if (norm_angle < 0.0f) norm_angle += TWO_PI;
     
-    /* Vypočítáme přesnou desetinnou pozici v poli */
     float float_index = (norm_angle / TWO_PI) * (float)SAMPLE_COUNT;
     int idx1 = (int)float_index;
-    int idx2 = (idx1 + 1) % SAMPLE_COUNT; /* Kruhové pole (přetečení 499 -> 0) */
-    
-    /* Frakce určuje, jak blízko jsme k idx2 (0.0 až 0.999) */
+    int idx2 = (idx1 + 1) % SAMPLE_COUNT; 
     float fraction = float_index - (float)idx1;
     
-    /* Lineární mix hodnot */
     return final_lut[idx1] * (1.0f - fraction) + final_lut[idx2] * fraction;
 }
 
@@ -97,7 +88,6 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
         bldc_motor_loop_foc(motor);
         motor->current_sp = original_sp; 
 
-        /* Zápis surových hodnot do správného chlívečku */
         float norm_angle = fmodf(angle, TWO_PI);
         if (norm_angle < 0.0f) norm_angle += TWO_PI;
         int index = (int)((norm_angle / TWO_PI) * SAMPLE_COUNT);
@@ -122,20 +112,35 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
 
 void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem) 
 {
+    /* 1. BEZPEČNOSTNÍ POJISTKA: Kontrola FOC Inicializace */
+    if (motor->motor_status != MOTOR_READY) {
+        printk("===================================================\n");
+        printk("!!! ANTICOGGING CALIBRATION BLOCKED !!!\n");
+        printk("FOC initialization (PP check) failed at startup.\n");
+        printk("Motor is likely physically blocked or disconnected.\n");
+        printk("Please free the motor shaft and restart the board.\n");
+        printk("===================================================\n");
+        return; 
+    }
+
     static float lut_cw[SAMPLE_COUNT];
     static float lut_ccw[SAMPLE_COUNT];
     static float smoothed_lut[SAMPLE_COUNT];
 
-    /* --- TANK MODE PID --- */
     float saved_kp = motor->pid_velocity.p;
     float saved_ki = motor->pid_velocity.i;
     float saved_v_limit = motor->pid_velocity.limit;
     float saved_c_limit = motor->current_limit;
 
-    motor->pid_velocity.p = 0.05f;       
-    motor->pid_velocity.i = 1.0f;        
-    motor->pid_velocity.limit = 0.8f;    
-    motor->current_limit = 0.8f;         
+    /* =========================================================================
+     * 2. OPRAVA SÍLY A OSCILACÍ: "Tvrdá pružina" (Stiff Position Loop)
+     * ========================================================================= */
+    /* P=0.25 vyvine velkou sílu k proražení zubu (až 0.78A při nulové rychlosti).
+       I=0.02 zabrání "visení" na statickém tření, ale nezpůsobí wind-up výstřely. */
+    motor->pid_velocity.p = 0.25f;       
+    motor->pid_velocity.i = 0.02f;        
+    motor->pid_velocity.limit = 1.0f;    
+    motor->current_limit = 1.0f;         
 
     for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = 0.0f;
     
@@ -152,7 +157,6 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         float sum_residual_error = 0.0f;
 
         for (int i = 0; i < SAMPLE_COUNT; i++) {
-            /* Průměr obou směrů vyruší asymetrické tření ložisek */
             float avg_residual = (lut_cw[i] + lut_ccw[i]) / 2.0f;
             final_lut[i] += (avg_residual * RELAXATION_GAIN);
 
@@ -161,23 +165,6 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
             if (abs_err > max_residual_error) max_residual_error = abs_err;
         }
 
-        /* =========================================================================
-         * OPTIMALIZACE 2: KLOUZAVÝ PRŮMĚR (Vyhlazení šumu)
-         * "Vyžehlí" LUT mapu a odstraní píkující hodnoty způsobené šumem senzoru.
-         * ========================================================================= */
-        int window = 5; 
-        int half_w = window / 2;
-        for (int i = 0; i < SAMPLE_COUNT; i++) {
-            float sum = 0.0f;
-            for (int j = -half_w; j <= half_w; j++) {
-                int idx = (i + j + SAMPLE_COUNT) % SAMPLE_COUNT; // Bezpečný oběh kruhového pole
-                sum += final_lut[idx];
-            }
-            smoothed_lut[i] = sum / (float)window;
-        }
-        for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = smoothed_lut[i];
-
-        /* Logování čistého pokroku */
         float mean_error = sum_residual_error / (float)SAMPLE_COUNT;
         printk("     Mean residual error = %.4f A (Max spike = %.4f A)\n", (double)mean_error, (double)max_residual_error);
 
@@ -188,7 +175,22 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         k_msleep(500); 
     }
 
-    /* --- RESTORE PID --- */
+    /* =========================================================================
+     * 3. FILTRACE: Aplikace vyhlazení až na zcela spojenou finální mapu
+     * ========================================================================= */
+    int window = 5; 
+    int half_w = window / 2;
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        float sum = 0.0f;
+        for (int j = -half_w; j <= half_w; j++) {
+            int idx = (i + j + SAMPLE_COUNT) % SAMPLE_COUNT; 
+            sum += final_lut[idx];
+        }
+        smoothed_lut[i] = sum / (float)window;
+    }
+    for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = smoothed_lut[i];
+
+    /* Návrat uživatelských PID hodnot po úspěšné kalibraci */
     motor->pid_velocity.p = saved_kp;
     motor->pid_velocity.i = saved_ki;
     motor->pid_velocity.limit = saved_v_limit;
@@ -201,5 +203,4 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         printk("%d,%f\n", i, (double)final_lut[i]);
     }
     printk("=== END LUT DUMP ===\n");
-    k_msleep(2000);
 }
