@@ -3,6 +3,11 @@
  * Final Consistent Calibration (Lerp + Single-Pass Filter)
  */
 
+
+/* TO DO: alghoritm still isn't 100% reliable - occasional oscillation resulting in the wrong LUT values.
+   hardcoded LUT -> directly write LUT to the flash memory and read it from there.
+ */
+
 #include "anticogging.h"
 #include "drivers/bldc_motor.h"
 #include <zephyr/logging/log.h>
@@ -176,6 +181,32 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
 
 void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem) 
 {
+    // Check if the LUT has been preloaded with data, if so, skip calibration and use the preloaded data
+    bool table_has_data = false;
+
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        if (anticogging_lut[i] != 0.0f) {
+            table_has_data = true;
+            break; 
+        }
+    }
+
+    if(table_has_data)
+    {
+        printk("LUT has been preloaded with data, skipping calibration.\n");
+        printk("=== START LUT DUMP ===\n");
+        printk("Index,Current_A\n");
+
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            final_lut[i] = anticogging_lut[i];
+            printk("%d,%f\n", i, (double)final_lut[i]);
+        }
+
+        printk("=== END LUT DUMP ===\n");
+        k_msleep(1000);
+        return;
+    }
+
     /* 1. BEZPEČNOSTNÍ POJISTKA: Kontrola FOC Inicializace */
     if (motor->motor_status != MOTOR_READY) {
         printk("===================================================\n");
@@ -198,6 +229,10 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     float saved_c_limit = motor->current_limit;
     float saved_vel_ts = motor->lpf_velocity.Ts;
     float saved_out_ramp = motor->pid_velocity.output_ramp;
+    motion_control_type_t saved_controller = motor->controller;
+
+    // set VELOCITY control mode for calibration
+    motor->controller = VELOCITY;
 
     /* OPRAVA: Návrat k "měkké gumě" bez Integrator Windup efektu */
     motor->pid_velocity.p = 0.05f;       /* Hladké obkreslení zubů (žádné kmitání) */
@@ -285,6 +320,7 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     motor->current_limit = saved_c_limit;
     motor->lpf_velocity.Ts = saved_vel_ts;
     motor->pid_velocity.output_ramp = saved_out_ramp;
+    motor->controller = saved_controller;
 
     printk("---> CALIBRATION COMPLETED ---\n");
     printk("=== START LUT DUMP ===\n");

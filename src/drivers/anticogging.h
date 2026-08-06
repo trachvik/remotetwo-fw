@@ -9,6 +9,10 @@
 #include "drivers/bldc_motor.h"
 #include <zephyr/kernel.h>
 
+/* Externí deklarace tabulky a úhlu */
+extern const float anticogging_lut[500];
+//extern const float zero_electric_angle;
+
 /**
  * @brief Returns the feedforward current required to overcome cogging at a given angle.
  * * @param mechanical_angle Current mechanical angle of the motor in radians.

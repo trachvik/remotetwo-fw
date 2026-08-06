@@ -101,13 +101,20 @@ static void haptic_loop(bldc_motor_t *m)
     /* 1. Update sensor */
     sensor_update(m->sensor);
 
-    /* 2. VELOCITY LOOP - DOWNSAMPLING to 100 Hz */
-    static int move_divider = 0;
+    // 2. VELOCITY LOOP - DOWNSAMPLING to 100 Hz 
+    /*static int move_divider = 0;
     if (++move_divider >= 50) { 
         move_divider = 0;
-        float target_velocity_rad_s = 6.283f; 
+        float target_velocity_rad_s = 0.0f; 
         bldc_motor_move(m, target_velocity_rad_s);
-    }
+    }*/
+
+    // TORQUE mode:
+    // debug:
+    //static int debug_devider = 0;
+    //static float ff_factor = -2.0f;
+
+    bldc_motor_move(m, 0.0f);
     
     /* Save the pure PID value for diagnostics/logging */
     float original_sp = m->current_sp; 
@@ -117,21 +124,28 @@ static void haptic_loop(bldc_motor_t *m)
         float raw_ff = anticogging_get_feedforward(sensor_get_angle(m->sensor));
         
         /* Absolute value of the current rotor velocity */
-        float abs_vel = (m->shaft_velocity < 0.0f) ? -m->shaft_velocity : m->shaft_velocity;
-        float fade_factor = 1.0f;
+        //float abs_vel = (m->shaft_velocity < 0.0f) ? -m->shaft_velocity : m->shaft_velocity;
+        //float fade_factor = 1.0f;
         
         /* Start fading out at 1.5 rad/s, disable completely at 3.0 rad/s */
-        float fade_start = 1.5f; 
+        /*float fade_start = 1.5f; 
         float fade_end = 3.0f;
         
         if (abs_vel >= fade_end) {
             fade_factor = 0.0f;
         } else if (abs_vel > fade_start) {
-            /* Linear fade-out from 1.0 to 0.0 */
+            // Linear fade-out from 1.0 to 0.0 
             fade_factor = 1.0f - ((abs_vel - fade_start) / (fade_end - fade_start));
-        }
+        }*/
+        /*if (debug_devider++ >= 5000*5) { // every 5 seconds
+            debug_devider = 0;
+            ff_factor += 0.2f;
+            if (ff_factor > 2.0f) ff_factor = -2.0f;
+            printk("DEBUG: ff_factor = %f\n", (double)ff_factor);
+        }*/
         
-        m->current_sp += (raw_ff * fade_factor); 
+        //m->current_sp += (raw_ff * fade_factor); 
+        m->current_sp += 1.5f*raw_ff;//*ff_factor; // even at 3RPS, the feedforward is still useful to overcome cogging
     #endif
 
     /* 4. CURRENT LOOP */
@@ -140,8 +154,8 @@ static void haptic_loop(bldc_motor_t *m)
     /* Restore the pure PID value so it doesn't get written back into the structure */
     m->current_sp = original_sp; 
 
-    /* --- SERIALPLOT LOGGING (100 Hz) --- */
-    static int log_counter = 0;
+    // --- SERIALPLOT LOGGING (100 Hz) --- 
+   /* static int log_counter = 0;
     if (++log_counter >= 50) { 
         log_counter = 0;
         float raw_vel = sensor_get_velocity(m->sensor);
@@ -153,12 +167,12 @@ static void haptic_loop(bldc_motor_t *m)
             (double)m->shaft_velocity,   
             (double)(original_sp * 10.0f),
             (double)bx_mt,
-            (double)by_mt); 
+            (double)by_mt); */
  
                /* Plotting original_sp! In SerialPlot, you should see the 
                 * green wave gradually shrinking to zero, as the mapping (ff) 
                 * takes over overcoming the cogging instead of the controller. */
-    }
+    //}
 }
 
 /**
@@ -281,7 +295,7 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
         motor.lpf_velocity.Ts = 0.01f;    // FIX 1: Hardcode the time step (100 Hz = 10 ms)
         
         /* Control mode change: Outer is velocity, inner is current */
-        motor.controller = VELOCITY; 
+        motor.controller = TORQUE; 
         motor.torque_controller = FOC_CURRENT;
 
         /* FIX 2: Hardcode the direction so the velocity multiplier isn't zero! */
