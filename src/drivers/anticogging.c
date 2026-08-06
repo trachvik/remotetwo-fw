@@ -26,6 +26,15 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
  * pass, so 0.5 would just ship half the real cogging (under-compensation). */
 #define RELAXATION_GAIN 1.0f
 #define ERROR_THRESHOLD 0.005f 
+/* Number of independent, NON-compensating calibration passes to average. Each
+ * pass measures the raw (ff=0) cogging, so all passes estimate the SAME fixed
+ * quantity. Averaging them cuts random stick-slip / sensor noise by ~sqrt(N)
+ * without the systematic bias that iterative feedback added at sharp features. */
+#define CALIB_AVERAGES 3
+/* Break-away current pre-loaded into the velocity-PID integrator at the start of
+ * each pass. Gives the rotor immediate torque to overcome static friction/cogging
+ * so the velocity set-point can ramp smoothly from 0 (no start step = no lurch). */
+#define CALIB_BREAKAWAY_A 0.12f
 
 static float final_lut[SAMPLE_COUNT] = {0};
 
@@ -82,8 +91,17 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
      * motor doesn't lurch on start (especially when reversing direction). */
     pid_controller_reset(&motor->pid_velocity);
 
+    /* Pre-load the velocity-PID integrator with a small break-away current in the
+     * direction of travel. This gives the rotor immediate torque to overcome
+     * static friction/cogging WITHOUT stepping the velocity set-point. The old
+     * 30% start_frac was a hard velocity step that made the motor lurch at the
+     * start of every spin-up; now the set-point ramps smoothly from 0 while this
+     * stored current does the break-away. The slew limiter eases it in over a
+     * few ms, so there is no snap. */
+    motor->pid_velocity.integral_prev = copysignf(CALIB_BREAKAWAY_A, target_speed);
+
     uint32_t stabilize_ticks = (uint32_t)(2.0f * 5000.0f); 
-    uint32_t ramp_ticks = (uint32_t)(1.2f * 5000.0f); /* soft-start accel over 1.2 s */
+    uint32_t ramp_ticks = (uint32_t)(1.5f * 5000.0f); /* jerk-free soft-start accel over 1.5 s */
     int move_divider = 0;
     
     for(uint32_t i = 0; i < stabilize_ticks; i++) {
@@ -92,17 +110,17 @@ static void run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_s
         
         if (++move_divider >= 5) { // 1000 Hz update for motion control
             move_divider = 0;
-            /* Smooth acceleration into the (uncompensated) warm-up spin. Starting
-             * from 0 lets the rotor stall against static friction/cogging and then
-             * lurch free; stepping straight to full speed overshoots and rings.
-             * Begin at a fraction that gives immediate break-away torque, then use
-             * a smoothstep (ease in/out) curve up to full speed. */
+            /* Velocity set-point ramps from 0 to full speed with a QUINTIC
+             * (5th-order) S-curve. Unlike cubic smoothstep, the quintic has zero
+             * acceleration AND zero jerk at both ends, so the demanded torque
+             * never changes abruptly anywhere along the ramp - the smoothest
+             * possible spin-up. Break-away is handled by the pre-loaded
+             * integrator above, so we start cleanly from 0 with no step. */
             float s = target_speed;
             if (i < ramp_ticks) {
-                float t = (float)i / (float)ramp_ticks;      /* 0 -> 1 */
-                float smooth = t * t * (3.0f - 2.0f * t);    /* smoothstep */
-                float start_frac = 0.30f;                    /* immediate break-away */
-                s = target_speed * (start_frac + (1.0f - start_frac) * smooth);
+                float t = (float)i / (float)ramp_ticks;                        /* 0 -> 1 */
+                float smooth = t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);   /* smootherstep */
+                s = target_speed * smooth;
             }
             bldc_motor_move(motor, s);
         }
@@ -172,10 +190,7 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     static float lut_cw[SAMPLE_COUNT];
     static float lut_ccw[SAMPLE_COUNT];
     static float residual[SAMPLE_COUNT];
-    static float best_lut[SAMPLE_COUNT];
-
-    float best_error = 1e30f;
-    float prev_error = 1e30f;
+    static float accum[SAMPLE_COUNT];
 
     float saved_kp = motor->pid_velocity.p;
     float saved_ki = motor->pid_velocity.i;
@@ -206,12 +221,18 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
      * smoothing behaves as intended. Restored after calibration. */
     motor->lpf_velocity.Ts = 0.001f;
 
-    for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = 0.0f;
-    
-    printk("---> ANTICOGGING CALIBRATION START\n");
+    /* Zero the shipped map AND the averaging accumulator. final_lut stays 0 for
+     * the WHOLE calibration, so every pass measures the same raw (uncompensated)
+     * cogging - the passes are independent estimates of one fixed quantity. */
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        final_lut[i] = 0.0f;
+        accum[i] = 0.0f;
+    }
 
-    for (int iter = 1; iter <= MAX_ITERATIONS; iter++) {
-        printk("---> ITERATION %d / %d ---\n", iter, MAX_ITERATIONS);
+    printk("---> ANTICOGGING CALIBRATION START (%d averages)\n", CALIB_AVERAGES);
+
+    for (int pass = 1; pass <= CALIB_AVERAGES; pass++) {
+        printk("---> PASS %d / %d ---\n", pass, CALIB_AVERAGES);
 
         run_directional_calibration(motor, foc_sem, CALIB_SPEED_RAD_S, lut_cw);
         k_msleep(500); 
@@ -222,8 +243,7 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
 
         /* Combine both directions (cancels direction-dependent friction, keeps
          * position-dependent cogging), clamp obvious spikes, then spatially
-         * smooth the residual BEFORE feeding it back. A noisy residual is what
-         * makes the feedforward - and thus the motion - jerky and oscillate. */
+         * smooth this pass BEFORE adding it to the ensemble average. */
         for (int i = 0; i < SAMPLE_COUNT; i++) {
             float r = 0.5f * (lut_cw[i] + lut_ccw[i]);
             if (r >  0.5f) r =  0.5f;
@@ -233,7 +253,7 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         smooth_lut_circular(residual, 5);
 
         for (int i = 0; i < SAMPLE_COUNT; i++) {
-            final_lut[i] += residual[i] * RELAXATION_GAIN;
+            accum[i] += residual[i];
 
             float abs_err = fabs(residual[i]);
             sum_residual_error += abs_err;
@@ -241,31 +261,17 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         }
 
         float mean_error = sum_residual_error / (float)SAMPLE_COUNT;
-        printk("     Mean residual error = %.4f A (Max spike = %.4f A)\n", (double)mean_error, (double)max_residual_error);
+        printk("     Pass mean cogging = %.4f A (Max spike = %.4f A)\n", (double)mean_error, (double)max_residual_error);
 
-        /* Keep the BEST map. On this hardware the residual measurement lags the
-         * real cogging at CALIB_SPEED_RAD_S (velocity-filter + current-loop lag),
-         * so beyond the first pass the error stops dropping and can creep up.
-         * Snapshot the lowest-error map and never ship a worse one. */
-        if (mean_error < best_error) {
-            best_error = mean_error;
-            for (int i = 0; i < SAMPLE_COUNT; i++) best_lut[i] = final_lut[i];
-        }
-
-        if (max_residual_error < ERROR_THRESHOLD) {
-            printk("---> Error below threshold. Calibration finished early!\n");
-            break; 
-        }
-        if (mean_error > prev_error) {
-            printk("---> Error increased vs previous iteration - stopping (keeping best).\n");
-            break;
-        }
-        prev_error = mean_error;
-        k_msleep(500); 
+        if (pass < CALIB_AVERAGES) k_msleep(500); 
     }
 
-    /* Ship the best map found across the iterations. */
-    for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] = best_lut[i];
+    /* Ensemble average of the independent passes. Because final_lut was never fed
+     * back, each pass is an unbiased estimate of the true cogging; the mean keeps
+     * that accuracy but with ~sqrt(N) less random noise -> more repeatable map. */
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        final_lut[i] = accum[i] * RELAXATION_GAIN / (float)CALIB_AVERAGES;
+    }
 
     /* =========================================================================
      * 3. FILTRACE: závěrečné lehké vyhlazení plně sestavené finální mapy
