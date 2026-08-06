@@ -19,7 +19,12 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 #define CALIB_SPEED_RAD_S 3.14159f
 #define CALIB_REVOLUTIONS 3
 #define MAX_ITERATIONS 5
-#define RELAXATION_GAIN 0.5f
+/* Learning gain per iteration. The residual measured in iteration 1 (with ff=0)
+ * IS the full current the velocity loop needs to overcome cogging, so we apply
+ * it fully (1.0). A value < 1.0 only makes sense if the ILC truly converges over
+ * many iterations - here it doesn't (measurement lag), we keep the best single
+ * pass, so 0.5 would just ship half the real cogging (under-compensation). */
+#define RELAXATION_GAIN 1.0f
 #define ERROR_THRESHOLD 0.005f 
 
 static float final_lut[SAMPLE_COUNT] = {0};
