@@ -28,4 +28,16 @@ float anticogging_get_feedforward(float mechanical_angle);
  */
 void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem);
 
+/**
+ * @brief Persist the measured FOC zero electric angle to flash.
+ * @return 0 on success, negative errno on failure.
+ */
+int anticogging_flash_save_zero_angle(float angle);
+
+/**
+ * @brief Load the previously stored FOC zero electric angle from flash.
+ * @return 0 on success, -ENOENT if nothing stored, negative errno on failure.
+ */
+int anticogging_flash_load_zero_angle(float *angle);
+
 #endif /* ANTICOGGING_H */

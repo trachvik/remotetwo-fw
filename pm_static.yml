@@ -19,7 +19,7 @@ mcuboot_secondary:
   size: 0x72000
   region: flash_primary
 
-EMPTY_0:
+settings_storage:
   address: 0xf6000
   size: 0xa000
   region: flash_primary

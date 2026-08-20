@@ -50,8 +50,8 @@ static int foc_power_rails_and_mute_oled(void)
 }
 SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 
-#define FOC_DO_CALIBRATION 1
-#define ANTICOGGING_COMPENSATION 1 // whether to use the anticogging map for feedforward compensation in velocity control loop
+#define FOC_DO_CALIBRATION 0
+#define ANTICOGGING_COMPENSATION 0 // whether to use the anticogging map for feedforward compensation in velocity control loop
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
@@ -63,12 +63,18 @@ SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
 #define MOTOR_POLE_PAIRS       11
 #define MOTOR_PHASE_RESISTANCE 5.6f    /* Ω */
 #define MOTOR_KV_RATING        141.0f  /* rpm/V */
-#define MOTOR_INDUCTANCE       0.0001f /* H = 100 µH */
+#define MOTOR_INDUCTANCE       0.00224f /* H = 2.24 mH, measured via step-voltage L_MEAS */
 
 /* Current loop tuning */
-#define HAPTIC_CURRENT_LOOP_BW_HZ    15.0f  /* Hz; | 2 % of the foc loop frequency */
+#define HAPTIC_CURRENT_LOOP_BW_HZ    20.0f  /* Hz; Kp/Ki derived from measured L=2.24mH, R=5.6 */
 #define HAPTIC_CURRENT_LPF_CUTOFF_HZ HAPTIC_CURRENT_LOOP_BW_HZ*3.3f /* Hz; from SimpleFOC docs | 5.0 -> 3.3*/
 #define HAPTIC_CURRENT_LIMIT         0.5f  /* A, hard clamp on q-current setpoint for safe bring-up */
+
+/* One-shot inductance measurement (step-voltage method); see measure_inductance() below */
+#define L_MEAS_ENABLE  0   /* measurement done: L=2.24 mH */
+#define L_MEAS_V_STEP  0.5f   /* V  - small enough not to move the rotor */
+#define L_MEAS_MS      5      /* ms - 5× expected τ is enough (τ < 1 ms for most small motors) */
+static void measure_inductance(void);
 
 /* Global hardware instances for this standalone test */
 static struct tmag5170_device encoder;
@@ -145,7 +151,7 @@ static void haptic_loop(bldc_motor_t *m)
         }*/
         
         //m->current_sp += (raw_ff * fade_factor); 
-        m->current_sp += 1.5f*raw_ff;//*ff_factor; // even at 3RPS, the feedforward is still useful to overcome cogging
+        m->current_sp += 0.8f*raw_ff;//*ff_factor; // even at 3RPS, the feedforward is still useful to overcome cogging
     #endif
 
     /* 4. CURRENT LOOP */
@@ -233,8 +239,8 @@ static int standalone_haptic_init(void)
     LOG_INF("  [OK] FOC calibration complete!");
 #else
 LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
-    motor.sensor_direction = DIR_CCW; 
-    motor.zero_electric_angle = 3.45f;
+    motor.sensor_direction = DIR_CW; 
+    motor.zero_electric_angle = 3.421f;
     bldc_motor_init_foc(&motor); 
     LOG_INF("  [OK] FOC initialized!");
 #endif
@@ -272,14 +278,6 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
                                           (float)HAPTIC_LOOP_HZ, 
                                           HAPTIC_CURRENT_LPF_CUTOFF_HZ);
 
-        /* ADDED: reduce Ki to avoid integrator windup during testing */
-        motor.pid_current_q.i = 20.0f; // Slightly liven up the inner loop
-        motor.pid_current_d.i = 20.0f;
-        
-        /* ADDED: Significant P gain to get a strong response for testing */
-        motor.pid_current_q.p = 0.02f; // Speed up response to setpoint
-        motor.pid_current_d.p = 0.02f;
-
         // ------------- NEW: VELOCITY LOOP -------------
         /* DIAGNOSTICS NOTE: 
          * Controller parameters (P=0.01) and filter (tf=0.015) were adjusted 
@@ -299,17 +297,21 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
         motor.torque_controller = FOC_CURRENT;
 
         /* FIX 2: Hardcode the direction so the velocity multiplier isn't zero! */
-        motor.sensor_direction = DIR_CW;  // (If it spins the wrong way, change to DIR_CCW)
+        //motor.sensor_direction = DIR_CW;  // (If it spins the wrong way, change to DIR_CCW)
         // ---------------------------------------------------
 
-        #if FOC_DO_CALIBRATION
+        //#if FOC_DO_CALIBRATION
             bldc_motor_align_current_sense(&motor);
-        #else
-            current_sense_set_gain_sign(-1.0f);
-        #endif
+        //#else
+         //   current_sense_set_gain_sign(-1.0f);
+        //#endif
         /* FORCE CLOSED LOOP CURRENT MODE */
         motor.torque_controller = FOC_CURRENT;
         printk("  [OK] FOC_CURRENT active!");
+
+#if L_MEAS_ENABLE
+        measure_inductance();
+#endif
     } else {
         LOG_ERR("  [FAIL] SAADC not ready, cannot test current control!");
         return -1; /* Stop execution if ADC is dead, no point in continuing */
@@ -331,6 +333,63 @@ LOG_INF("4. Bypassing calibration, setting TRUE diagnostic zero...");
     k_thread_name_set(&haptic_thread_data, "haptic_foc");
 
     return 0;
+}
+
+/* =========================================================================
+ * ONE-SHOT INDUCTANCE MEASUREMENT (step-voltage method)
+ * Motor must be at standstill, electrical angle locked to 0 before calling.
+ * Applies V_step on the alpha axis, samples current for MEAS_MS, fits τ = L/R.
+ * ========================================================================= */
+
+static void measure_inductance(void)
+{
+#if L_MEAS_ENABLE
+    const int samples = L_MEAS_MS * 1000 / 200; /* at 5 kHz = 200 µs per step */
+    const float Ts = 0.0002f;
+    const float R  = MOTOR_PHASE_RESISTANCE;
+    const float V  = L_MEAS_V_STEP;
+    const float I_ss = V / R; /* expected steady-state current */
+
+    /* Lock rotor at electrical angle 0 with a tiny d-axis voltage. */
+    bldc_motor_set_phase_voltage(&motor, 0.0f, V, 0.0f);
+    k_msleep(L_MEAS_MS * 5);  /* let rotor settle before we start */
+
+    /* Step: switch on alpha voltage and record when current crosses 63 % of I_ss. */
+    bldc_motor_set_phase_voltage(&motor, 0.0f, 0.0f, 0.0f);
+    k_msleep(2); /* discharge */
+
+    float tau_est = 0.0f;
+    bool  found   = false;
+    bldc_motor_set_phase_voltage(&motor, 0.0f, V, 0.0f);
+
+    for (int i = 0; i < samples * 10 && !found; i++) {
+        k_usleep(200);
+        phase_current_t c = current_sense_get_phase_currents();
+        float ia = c.a * current_sense_get_gain_sign();
+        if (ia >= 0.632f * I_ss) {
+            tau_est = (float)(i + 1) * Ts; /* i+1: sleep runs before read */
+            found   = true;
+        }
+    }
+    bldc_motor_set_phase_voltage(&motor, 0.0f, 0.0f, 0.0f);
+
+    if (!found) {
+        printk("L_MEAS: current never reached 63%% of I_ss=%.3f A "
+               "- increase L_MEAS_V_STEP or L_MEAS_MS\n", (double)I_ss);
+        return;
+    }
+
+    float L_meas = tau_est * R;
+    printk("L_MEAS: tau=%.3f ms  L=%.1f uH  R=%.2f Ohm\n",
+           (double)(tau_est * 1e3f), (double)(L_meas * 1e6f), (double)R);
+
+    /* Suggest gains for common bandwidths. */
+    for (int bw = 5; bw <= 50; bw += 5) {
+        float wc = 2.0f * 3.14159f * (float)bw;
+        printk("  BW=%2d Hz -> Kp=%.5f  Ki=%.1f\n",
+               bw, (double)(L_meas * wc), (double)(R * wc));
+    }
+#endif
 }
 
 /* =========================================================================
