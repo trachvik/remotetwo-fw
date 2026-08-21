@@ -94,6 +94,14 @@ float driver_get_voltage_limit(bldc_driver_t *driver)
     return drv->voltage_limit;
 }
 
+float driver_get_voltage_power_supply(bldc_driver_t *driver)
+{
+    if (driver == NULL) return 0.0f;
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)driver;
+    return drv->voltage_power_supply;
+}
+
 /**
  * Current sense stubs
  */
@@ -517,7 +525,17 @@ void bldc_motor_set_phase_voltage(bldc_motor_t *motor, float uq, float ud, float
      * This eliminates even harmonics and reduces current THD by ~30% compared
      * to constant-midpoint SPWM.  Same fundamental torque, lower ripple.
      * Extends linear modulation range by 15.5% (2/sqrt(3) vs 1) at no cost.
-     */
+     *
+     * The centre MUST be half the DC BUS (what maps to 50% duty in
+     * driver_set_pwm), not motor->voltage_limit. motor->voltage_limit is the
+     * cap on the |U| vector magnitude and is deliberately only 0.58*Vdc for
+     * SVPWM; centering on it puts the waveform at 29% duty, so every negative
+     * phase excursion beyond Vdc*0.58/2 gets clamped to 0 V by the driver while
+     * the top 21% of the bus is never used. The asymmetric clip is a hard
+     * nonlinearity the current PI winds up against. */
+    float v_bus = driver_get_voltage_power_supply(motor->driver);
+    if (v_bus <= 0.0f) v_bus = motor->voltage_limit;
+
     if (motor->foc_modulation == SPACE_VECTOR_PWM) {
         float v_max = motor->ua;
         if (motor->ub > v_max) v_max = motor->ub;
@@ -525,13 +543,13 @@ void bldc_motor_set_phase_voltage(bldc_motor_t *motor, float uq, float ud, float
         float v_min = motor->ua;
         if (motor->ub < v_min) v_min = motor->ub;
         if (motor->uc < v_min) v_min = motor->uc;
-        float v_offset = 0.5f * motor->voltage_limit - 0.5f * (v_max + v_min);
+        float v_offset = 0.5f * v_bus - 0.5f * (v_max + v_min);
         motor->ua += v_offset;
         motor->ub += v_offset;
         motor->uc += v_offset;
     } else if (motor->modulation_centered) {
         /* SINE_PWM: constant half-VDC shift */
-        float mid = 0.5f * motor->voltage_limit;
+        float mid = 0.5f * v_bus;
         motor->ua += mid;
         motor->ub += mid;
         motor->uc += mid;
@@ -600,14 +618,20 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
         bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
         k_msleep(200);
 
-        /* Determine the direction the sensor moved. */
-        float moved = fabsf(mid_angle - end_angle);
+        /* Determine the direction the sensor moved. Wrap the delta into [-PI,PI]:
+         * the absolute sensor angle can straddle the 0/2*PI boundary, so a naive
+         * subtraction reports a near-full-turn move that fails the PP check and
+         * needlessly disables the motor even though the rotor moved correctly. */
+        float delta = mid_angle - end_angle;
+        while (delta >  _PI) delta -= _2PI;
+        while (delta < -_PI) delta += _2PI;
+        float moved = fabsf(delta);
         if (moved < MIN_ANGLE_DETECT_MOVEMENT) {
             LOG_ERR("MOT: Failed to notice movement");
             motor->motor_status = MOTOR_CALIB_FAILED;
             bldc_motor_disable(motor);
             return 0;   /* failed calibration */
-        } else if (mid_angle < end_angle) {
+        } else if (delta < 0.0f) {
             LOG_INF("MOT: sensor_direction == CCW");
             motor->sensor_direction = DIR_CCW;
         } else {
@@ -634,47 +658,59 @@ int bldc_motor_init_foc(bldc_motor_t *motor)
 
     /* ---- Zero electric angle offset (only if unknown) ---- */
     if (!_ISSET(motor->zero_electric_angle)) {
-        LOG_INF("MOT: Aligning zero electric angle (Dithering & Averaging)...");
+        LOG_INF("MOT: Aligning zero electric angle (rotating-field average)...");
 
-        /* 1. Hrubé uzamčení: Nastavíme úhel -90 deg (3*PI/2) a počkáme na prvotní usazení */
-        bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2);
+        /* Single-point alignment locks ONE pole and is corrupted by cogging: the
+         * detent pulls the rotor off the commanded angle, and which of the pole
+         * pairs it locks onto depends on the rest position at boot, so the offset
+         * differs run-to-run (rough/self-spin on some boots). Instead rotate the
+         * field through a full MECHANICAL revolution (pole_pairs electrical revs)
+         * forward and backward and take the circular mean of the per-step offset:
+         * cogging averages out over a revolution and friction hysteresis cancels
+         * between the two directions. Reduces to the old formula for one sample.
+         *
+         * The mean must be circular (atan2 of the summed sin/cos), not a plain
+         * arithmetic mean of the angles - the per-step offset straddles the
+         * 0/2*PI wrap, and averaging across that wrap lands the result half a
+         * turn away from the truth. */
+        motor->zero_electric_angle = 0.0f; /* electrical_angle() now returns raw shaft*pp */
+
+        const int   steps_per_rev = 100;
+        const int   total_steps   = motor->pole_pairs * steps_per_rev;
+        const float start_field   = _3PI_2;
+        float sin_sum = 0.0f, cos_sum = 0.0f;
+
+        /* Pre-lock at the start field and let the rotor settle. */
+        bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, start_field);
         k_msleep(300);
 
-        /* 2. Elektronické "cvrnknutí" (Dithering) pro překonání statického tření ložisek.
-         * Střídavě vychylujeme magnetické pole do stran a amplitudu postupně zmenšujeme. 
-         * Rotor se díky tomu dokonale setřese do absolutního středu. */
-        float wiggle_amp = 0.35f; /* Počáteční výkyv cca 20 elektrických stupňů */
-        for (int w = 0; w < 10; w++) {
-            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2 + wiggle_amp);
-            k_msleep(15);
-            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2 - wiggle_amp);
-            k_msleep(15);
-            wiggle_amp *= 0.6f; /* Postupné tlumení kmitů na nulu */
-        }
-
-        /* 3. Návrat přesně na střed a čas na finální zklidnění mechaniky */
-        bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, _3PI_2);
-        k_msleep(300);
-
-        /* 4. Oversampling (Průměrování měření) pro vyhlazení šumu senzoru */
-        motor->zero_electric_angle = 0.0f; /* Reset před výpočtem */
-        float angle_sum = 0.0f;
-        int num_samples = 16;
-
-        for (int s = 0; s < num_samples; s++) {
+        for (int i = 0; i <= total_steps; i++) {          /* forward sweep */
+            float field = start_field + _2PI * (float)i / (float)steps_per_rev;
+            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, field);
+            k_msleep(3);
             sensor_update(motor->sensor);
-            angle_sum += bldc_motor_electrical_angle(motor);
-            k_msleep(2); /* Velmi krátká pauza mezi vzorky */
+            float off = normalize_angle(bldc_motor_electrical_angle(motor) - field);
+            sin_sum += sinf(off);
+            cos_sum += cosf(off);
         }
-        
-        /* Uložení finálního, zprůměrovaného a mechanicky přesného úhlu */
-        motor->zero_electric_angle = angle_sum / (float)num_samples;
+        for (int i = total_steps; i >= 0; i--) {          /* backward sweep */
+            float field = start_field + _2PI * (float)i / (float)steps_per_rev;
+            bldc_motor_set_phase_voltage(motor, voltage_align, 0.0f, field);
+            k_msleep(3);
+            sensor_update(motor->sensor);
+            float off = normalize_angle(bldc_motor_electrical_angle(motor) - field);
+            sin_sum += sinf(off);
+            cos_sum += cosf(off);
+        }
 
         /* Stop everything. */
         bldc_motor_set_phase_voltage(motor, 0.0f, 0.0f, 0.0f);
         k_msleep(200);
-        
-        LOG_INF("MOT: Zero elec. angle: %.3f", (double)motor->zero_electric_angle);
+
+        motor->zero_electric_angle =
+            normalize_angle(start_field + atan2f(sin_sum, cos_sum));
+
+        LOG_INF("MOT: Zero elec. angle (avg): %.3f", (double)motor->zero_electric_angle);
     } else {
         LOG_INF("MOT: Skip offset calib.");
     }

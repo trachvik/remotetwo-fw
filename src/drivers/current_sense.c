@@ -118,7 +118,16 @@ LOG_MODULE_REGISTER(current_sense, LOG_LEVEL_DBG);
 
 #define NUM_CH        3                       /* reported phase channels SOA,SOB,SOC */
 #define NUM_SCAN_CH   2                       /* SOB + SOC only; SOA reconstructed */
-#define SCANS_PER_BUF 20
+/* g_raw[] is only refreshed on NRFX_SAADC_EVT_DONE, i.e. once per FULL buffer.
+ * The SAADC is triggered once per PWM period (25 kHz), so the measurement
+ * update rate is 25 kHz / SCANS_PER_BUF. At the old value of 20 that was
+ * 1.25 kHz: the 5 kHz current PI integrated the SAME sample four times in a
+ * row and the loop carried ~1.2 ms of transport delay, which ate ~47 deg of
+ * phase margin at crossover. 5 scans = 200 µs = exactly one FOC tick, so every
+ * PI iteration sees a fresh measurement and the delay drops to ~300 µs.
+ * Cost: the SAADC DONE IRQ now runs at 5 kHz instead of 1.25 kHz (the handler
+ * only copies two samples, so this is a few hundred cycles per FOC period). */
+#define SCANS_PER_BUF 5
 #define BUF_LEN       (NUM_SCAN_CH * SCANS_PER_BUF)
 
 /* Internal 0.6 V reference with gain 1/6 -> full-scale 3.6 V single-ended,

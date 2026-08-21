@@ -189,9 +189,17 @@
 		operating-mode = <2>;
 		magnetic-channels = "XY";
 		angle-measurement = "XY";
-		/* Noise reduction: 32x hardware oversampling => ~sqrt(32) ≈ 5.7x less
-		 * angle noise. Default oversampling=1 (chip reset) gave ~8 deg p-p. */
-		oversampling = <1>;
+		/* Hardware CONV_AVG averaging. The Zephyr driver uses DT_INST_ENUM_IDX
+		 * over the enum {1,2,4,8,16,32}, so this is the literal averaging
+		 * factor: <1> selected CONV_AVG=0 = NO averaging (chip reset default),
+		 * which is why the boot diagnostic showed ~0.25 deg p-p on a still
+		 * rotor. That is 18% of one cogging period (24N/22P => 264 cogging
+		 * cycles/rev => 1.36 deg period), which smears the anticogging map.
+		 * 8x gives ~2.8x less noise while keeping the conversion at ~200 us,
+		 * so it still supports the 5 kHz FOC loop with no added lag.
+		 * Do NOT use 32x here: ~800 us per conversion would put the angle
+		 * behind the commutation. */
+		oversampling = <8>;
 		/* Measured in-plane field |Bxy| ≈ 50 mT (magnet at working distance).
 		 * At ±25 mT (range 1) both axes railed at ~25 (fake 315° angle); at
 		 * ±50 mT (range 0) the dominant axis still pegs at ~49.9 mT => still
