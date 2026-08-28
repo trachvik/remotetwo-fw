@@ -55,7 +55,7 @@ SYS_INIT(foc_power_rails_and_mute_oled, POST_KERNEL, 10);
  * Set to 1 for one boot after any change that alters the applied field (phase
  * swap, modulation change, magnet/sensor reseat), then back to 0. */
 #define FOC_DO_CALIBRATION 1
-#define ANTICOGGING_COMPENSATION 0 // whether to use the anticogging map for feedforward compensation in velocity control loop
+#define ANTICOGGING_COMPENSATION 1 // whether to use the anticogging map for feedforward compensation in velocity control loop
 
 #define SUPPLY_VOLTAGE 3.75f
 #define HAPTIC_VOLTAGE_LIMIT SUPPLY_VOLTAGE
@@ -207,7 +207,7 @@ static void haptic_loop(bldc_motor_t *m)
         }*/
         
         //m->current_sp += (raw_ff * fade_factor); 
-        m->current_sp += 0.8f*raw_ff;//*ff_factor; // even at 3RPS, the feedforward is still useful to overcome cogging
+        m->current_sp += 0.8f * raw_ff;
     #endif
 
     /* 4. CURRENT LOOP */
@@ -412,6 +412,10 @@ static int standalone_haptic_init(void)
 #endif
 
     anticogging_calibrate(&motor, &haptic_sem);
+
+    /* Step-test / rest-probe coast Hi-Z. Haptic must have the bridge on. */
+    bldc_motor_reset_current_loop_state(&motor);
+    bldc_motor_set_bridge_hiz(&motor, false);
 
     //printk("---> [DEBUG 4] Calibration done, creating thread...\n");
     
@@ -690,7 +694,11 @@ static void run_current_step_test(void)
         }
     }
 
-    bldc_motor_set_phase_voltage(&motor, 0.0f, 0.0f, 0.0f);
+    /* PASS B leaves pid_current_d wound (~Ud for 250 mA) and lpf_current_d
+     * at ~250 mA. SVPWM of (0,0) is 50% on all phases = windings shorted.
+     * Either leftover would ring the 28 Hz cogging spring. Coast Hi-Z. */
+    bldc_motor_reset_current_loop_state(&motor);
+    bldc_motor_set_bridge_hiz(&motor, true);
 
     i_lo = step_ensemble(avg, (int16_t)((STEP_I_LOW + STEP_I_HIGH) * 500.0f), 1, &edges);
     if (edges > 0) {

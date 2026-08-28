@@ -101,6 +101,12 @@ void bldc_driver_3pwm_set_pwm(bldc_driver_3pwm_t *driver,
 void bldc_driver_3pwm_get_status(int *nfault, int *nsleep, int *inl);
 
 /**
+ * Drive INL. HIGH = complementary PWM (normal). LOW = low-side gates off,
+ * motor coasts Hi-Z (DRV8311H 3PWM mode). PWM duties are not changed.
+ */
+void bldc_driver_3pwm_set_lowside_enable(bldc_driver_3pwm_t *driver, bool enable);
+
+/**
  * Force-reassert the DRV8311H enable pins (INL HIGH, nSLEEP HIGH) and read
  * back the raw levels, returning the GPIO API return codes. Diagnostic helper
  * to distinguish "GPIO write does not take effect" (e.g. SPU/secure-domain or

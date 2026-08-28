@@ -343,4 +343,17 @@ void bldc_motor_configure_current_loop(bldc_motor_t *motor,
                                        float foc_hz,
                                        float lpf_cutoff_hz);
 
+/**
+ * Zero current-PI integrators, current LPFs, and Id/Iq/Vq/Vd. Does not
+ * retune gains. Call after a d-axis step test or before closing FOC_CURRENT
+ * so stale ~250 mA LPF / wound-up Ud cannot kick the shaft.
+ */
+void bldc_motor_reset_current_loop_state(bldc_motor_t *motor);
+
+/**
+ * Hi-Z the phase bridge (INL low) or restore complementary PWM (INL high).
+ * Always zeros PWM first so the low-side enable edge cannot dump voltage.
+ */
+void bldc_motor_set_bridge_hiz(bldc_motor_t *motor, bool hiz);
+
 #endif /* BLDC_MOTOR_H */

@@ -266,6 +266,14 @@ void bldc_driver_3pwm_set_pwm(bldc_driver_3pwm_t *driver,
     write_duty_cycles(g_period_ns, driver->dc_a, driver->dc_b, driver->dc_c);
 }
 
+void bldc_driver_3pwm_set_lowside_enable(bldc_driver_3pwm_t *driver, bool enable)
+{
+    ARG_UNUSED(driver);
+    if (gpio_is_ready_dt(&gpio_inl)) {
+        gpio_pin_set_dt(&gpio_inl, enable ? 1 : 0);
+    }
+}
+
 void bldc_driver_3pwm_get_status(int *nfault, int *nsleep, int *inl)
 {
     if (nfault) {

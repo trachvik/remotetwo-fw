@@ -74,10 +74,12 @@ static int64_t g_last_update_us    = 0;
  * observer outputs both a smooth angle (sensor_get_angle) and a smooth velocity
  * (sensor_get_velocity), so commutation and damping are both clean at the
  * source instead of being patched with downstream filters. */
-#define PLL_FN_HZ   20.0f   /* observer natural frequency */
+#define PLL_FN_HZ   20.0f   /* observer natural frequency (haptic default) */
 #define PLL_ZETA    0.8f    /* damping ratio */
+static float   g_pll_fn_hz   = PLL_FN_HZ;
 static float   g_pll_theta   = 0.0f;   /* tracked angle, rad [0,2pi) */
-static float   g_pll_omega   = 0.0f;   /* tracked velocity, rad/s */
+static float   g_pll_omega   = 0.0f;   /* tracked velocity, rad/s (lags) */
+static float   g_pll_rate    = 0.0f;   /* d(theta)/dt = omega + kp*e (lead) */
 static bool    g_pll_init    = false;
 static int64_t g_pll_last_us = 0;
 
@@ -236,16 +238,18 @@ void sensor_update(sensor_t *sensor)
 	if (!g_pll_init) {
 		g_pll_theta = theta_raw;
 		g_pll_omega = 0.0f;
+		g_pll_rate  = 0.0f;
 		g_pll_init  = true;
 	} else {
-		const float wn = two_pi * PLL_FN_HZ;
+		const float wn = two_pi * g_pll_fn_hz;
 		const float kp = 2.0f * PLL_ZETA * wn;
 		const float ki = wn * wn;
 		float e = theta_raw - g_pll_theta;
 		while (e >  (float)M_PI) e -= two_pi;
 		while (e < -(float)M_PI) e += two_pi;
 		g_pll_omega += ki * e * dt;
-		g_pll_theta += (g_pll_omega + kp * e) * dt;
+		g_pll_rate   = g_pll_omega + kp * e; /* instantaneous d(theta)/dt */
+		g_pll_theta += g_pll_rate * dt;
 		while (g_pll_theta >= two_pi) g_pll_theta -= two_pi;
 		while (g_pll_theta < 0.0f)    g_pll_theta += two_pi;
 	}
@@ -263,6 +267,30 @@ float sensor_get_velocity(sensor_t *sensor)
 	ARG_UNUSED(sensor);
 	/* Clean observer velocity (rad/s) for haptic damping. */
 	return g_pll_omega;
+}
+
+float sensor_get_track_rate(sensor_t *sensor)
+{
+	ARG_UNUSED(sensor);
+	/* d(tracked_angle)/dt. PLL omega lags the true rate by ~90° more than
+	 * this lead estimate; damping at 35 Hz must use the lead. */
+	return g_pll_rate;
+}
+
+void sensor_set_observer_bw(float fn_hz)
+{
+	if (fn_hz < 5.0f) {
+		fn_hz = 5.0f;
+	}
+	if (fn_hz > 150.0f) {
+		fn_hz = 150.0f;
+	}
+	g_pll_fn_hz = fn_hz;
+}
+
+float sensor_get_observer_bw(void)
+{
+	return g_pll_fn_hz;
 }
 
 float sensor_get_bx_mt(sensor_t *sensor)

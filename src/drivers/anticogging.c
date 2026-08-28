@@ -22,12 +22,25 @@
 extern float sensor_get_angle(void *sensor);
 extern float sensor_get_velocity(void *sensor);
 extern void sensor_update(void *sensor);
+extern void sensor_set_observer_bw(float fn_hz);
+extern float sensor_get_observer_bw(void);
 
 LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 
 #define SAMPLE_COUNT 500
 #define TWO_PI 6.28318530718f
-#define CALIB_SPEED_RAD_S 3.14159f
+/* Minimum safe calibration speed determined by the P-term stall criterion:
+ *   KP × ω > I_cog_peak    (P-term alone must break any cogging tooth)
+ *   0.05 × ω > 0.13 A  →  ω > 2.6 rad/s
+ *
+ * At ω = 2.0 rad/s: KP×ω = 0.10 A < 0.13 A cogging peak → the rotor stalls
+ * at the hardest teeth, then lurches when the integrator winds up → stick-slip,
+ * audible vibration, and a nearly-flat LUT from near-zero mean Iq.
+ *
+ * At ω = π rad/s ≈ 3.14 rad/s: KP×π = 0.157 A > 0.13 A → the P-term breaks
+ * every tooth without any integrator wind-up → smooth, continuous rotation.
+ * This is the speed used in the original working calibration (commit 271edba). */
+#define CALIB_SPEED_RAD_S 3.14159f   /* π rad/s – original working value */
 #define CALIB_REVOLUTIONS 3
 #define MAX_ITERATIONS 5
 /* Learning gain per iteration. The residual measured in iteration 1 (with ff=0)
@@ -41,11 +54,11 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
  * pass measures the raw (ff=0) cogging, so all passes estimate the SAME fixed
  * quantity. Averaging them cuts random stick-slip / sensor noise by ~sqrt(N)
  * without the systematic bias that iterative feedback added at sharp features. */
-#define CALIB_AVERAGES 3
+#define CALIB_AVERAGES 2
 /* Break-away current pre-loaded into the velocity-PID integrator at the start of
  * each pass. Gives the rotor immediate torque to overcome static friction/cogging
  * so the velocity set-point can ramp smoothly from 0 (no start step = no lurch). */
-#define CALIB_BREAKAWAY_A 0.12f
+#define CALIB_BREAKAWAY_A  0.08f   /* preloaded integrator current to start moving */
 
 /* ---- Option B: standstill DETENT calibration ----------------------------------
  * Set to 1 to run a one-time standstill calibration that measures the STATIC
@@ -53,57 +66,35 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
  * and DUMPS the LUT to serial. Paste that dump into anticogging_data.c, then set
  * this back to 0. */
 #define ANTICOGGING_STATIC_CALIB 1
+/* Sample-to-sample POSITION HOLD: 500 discrete angles per revolution.
+ *
+ * FOC_CURRENT at standstill is a current source: it cancels back-EMF, so the
+ * cogging spring (J θ'' + Ks θ = Kt I_cmd) is undamped and rings at ~28 Hz.
+ * That is the in-place buzz after a quiet Hi-Z rest probe. The sweep therefore
+ * applies VOLTAGE (Uq = I_cmd * R, Ud = 0). BEMF through R damps the spring.
+ * The slow PI still walks I_cmd until the shaft sits at each 0.72° target. */
+#define ANTICOGGING_POSITION_HOLD 1
 #define STATIC_POINTS      500     /* one hold target per LUT bin (full coverage) */
-#define STATIC_SETTLE_MS   150     /* let the rotor settle before measuring */
-#define STATIC_MEASURE_MS  40      /* window whose mean holding current = detent */
+#define STATIC_RAMP_MS     200     /* unused by ILC event-steps; kept for !ILC path */
+#define STATIC_SETTLE_MS   200
+#define STATIC_MEASURE_MS  80      /* window whose mean I_cmd = detent at arrival */
 #define STATIC_FOC_HZ_I    5000    /* integer form, for array sizes */
 #define STATIC_FOC_HZ      ((float)STATIC_FOC_HZ_I)
-#define STATIC_POS_HZ      500.0f  /* must match TMAG/PLL update, not the 5 kHz FOC rate */
+#define STATIC_POS_HZ      500.0f  /* position law; must not exceed the TMAG rate */
+#define STEP_TIMEOUT_MS    700     /* give up on a crest and skip to where we are */
+#define ARRIVE_RAD         0.008f  /* 8 mrad; inside a 0.72 deg = 12.6 mrad step */
 
-/* ---- Position-hold servo -------------------------------------------------------
- * From current to position the plant is a PURE DOUBLE INTEGRATOR:
- *
- *     theta'' = (Kt/J) * i        =>   P(s) = B / s^2,  B = Kt/J
- *
- * s^-2 contributes -180 deg of phase at EVERY frequency, and a PI controller can
- * only add more lag on top of that. There is therefore no gain at which a PI
- * position loop on this plant has positive phase margin - it limit-cycles no
- * matter how KP and KI are chosen. Only the D term supplies phase lead, so
- * KD = 0 is not a tuning choice, it is an unstable configuration. Everything the
- * detent and bearing friction do is incidental damping that merely bounds the
- * amplitude of the oscillation.
- *
- * Gains are derived at runtime from the MEASURED plant gain B (see
- * measure_plant_gain()) for a standard second-order target:
- *
- *     KP = wn^2 / B      KD = 2*zeta*wn / B      KI = wn*KP / 4
- *
- * The closed loop is s^3 + KD*B*s^2 + KP*B*s + KI*B, so Routh-Hurwitz needs
- * KI < 2*zeta*wn^3/B; the KI above is 7x inside that bound. Its time constant
- * KP/KI = 4/wn is ~42 ms, which has to settle within STATIC_SETTLE_MS - that,
- * plus the warm start from the previous point, is what makes the holding current
- * converge before the measurement window opens.
- *
- * The 8 Hz target is not arbitrary. The derivation above only accounts for the
- * plant, but the loop also carries the ~100 Hz current loop and the 500 Hz
- * sampling. At a 15 Hz target the D term pushes gain crossover out to ~27 Hz,
- * where those two contribute ~15 deg and ~10 deg of extra lag and eat the phase
- * margin down to roughly 15 deg - marginal, and it rings. At 8 Hz crossover
- * lands near 15 Hz and the margin stays around 40 deg. As a sanity check, 8 Hz
- * puts KI at ~2.2, essentially where hand tuning had landed it. */
-#define STATIC_POS_BW_HZ   8.0f    /* wn; settling must fit inside STATIC_SETTLE_MS */
-#define STATIC_POS_ZETA    0.9f    /* near-critical: no overshoot, no ringing */
-
-/* Scale applied to all three derived gains. Back this off to soften the servo
- * without re-deriving anything. */
-#define POS_GAIN_SCALE     1.0f
-
-/* Velocity for the D term is a backward difference of the sensor angle, filtered
- * by a one-pole IIR at STATIC_POS_HZ. Its cutoff is alpha*f_s/(2*pi), so the old
- * alpha of 0.08 put the corner at 6.4 Hz - BELOW the loop bandwidth, which turned
- * the derivative into another lag stage and is why adding D used to make the
- * vibration worse. 0.5 puts it near 40 Hz, comfortably above wn. */
-#define STATIC_VEL_ALPHA   0.5f
+/* Voltage-mode position law. 0.72 deg in a well needs ~Ks*dθ ≈ 42 mA
+ * (Ks ≈ 3.3 A/rad). KP*0.0126 rad must supply that without a 100 mA DC
+ * crawl: the crawl parked the rotor on the slope (~34 mA) then the PI
+ * braked after every tooth jump — sit, sit, hop. Torque is forward-only
+ * so a jump does not get pulled back into a well. */
+#define POS_KP             3.50f   /* A/rad; 0.72 deg → 44 mA, enough to leave a well */
+#define POS_KI             6.00f   /* A/(rad*s); climbs the rest of a tooth if KP stalls */
+#define POS_KD             0.0f
+#define D_LPF_HZ           8.0f
+#define POS_SLEW_A_PER_S   1.0f
+#define CRAWL_A            0.02f   /* static friction only; 100 mA caused 16 deg hops */
 
 /* Hard ceiling on the holding current. Also clamped at runtime to the motor's
  * own current_limit, which the locked-rotor test lowers to whatever keeps both
@@ -137,7 +128,7 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
 #define PLANT_PULSE_MS     30      /* cap; the velocity limit usually ends it sooner */
 #define PLANT_REST_MS      400     /* let the detent catch the rotor between pulses */
 #define PLANT_OMEGA_MAX    5.0f    /* rad/s; above this back-EMF eats the Vq budget */
-#define PLANT_TRIES        3
+#define PLANT_TRIES        0
 #define PLANT_MAX_TICKS    (PLANT_PULSE_MS * STATIC_FOC_HZ_I / 1000)
 
 /* ---- Position-hold stability probe --------------------------------------------
@@ -154,8 +145,8 @@ LOG_MODULE_REGISTER(anticogging, LOG_LEVEL_INF);
  *     Standstill -> no current-loop phase lag -> best for haptics on this HW.
  * 0 = single-pass static detent hold (same physics, one forward+backward sweep). */
 #define ANTICOGGING_USE_ILC 1
-#define ILC_ITERATIONS     2       /* refinement passes; PI residual -> 0 as LUT converges */
-#define ILC_RELAX_GAIN     0.6f    /* relaxation: lut += gain*(measured - lut) */
+#define ILC_ITERATIONS     1       /* one bidir pass; stiff ILC pumped 35/176 Hz */
+#define ILC_RELAX_GAIN     1.0f    /* lut := measured holding current (bidirectional avg) */
 #define STATIC_DT          (1.0f / STATIC_FOC_HZ)
 
 /* Circular smoothing window, in LUT bins. The measured cogging content sits at
@@ -194,7 +185,7 @@ float anticogging_get_feedforward(float mechanical_angle)
 /* Circular (wrap-around) moving-average smoothing of a LUT in place. `window`
  * should be odd. Used to reject random per-bin spikes so the feedforward - and
  * therefore the motor motion - stays smooth. */
-static void __attribute__((unused))
+static void
 smooth_lut_circular(float *arr, int window)
 {
     static float tmp[SAMPLE_COUNT];
@@ -211,7 +202,8 @@ smooth_lut_circular(float *arr, int window)
     for (int i = 0; i < SAMPLE_COUNT; i++) arr[i] = tmp[i];
 }
 
-static void __attribute__((unused))
+#if !ANTICOGGING_POSITION_HOLD
+static void
 run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_sem, float target_speed, float *output_lut) 
 {
     static float temp_sum[SAMPLE_COUNT];
@@ -235,8 +227,8 @@ run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_sem, float ta
      * few ms, so there is no snap. */
     motor->pid_velocity.integral_prev = copysignf(CALIB_BREAKAWAY_A, target_speed);
 
-    uint32_t stabilize_ticks = (uint32_t)(2.0f * 5000.0f); 
-    uint32_t ramp_ticks = (uint32_t)(1.5f * 5000.0f); /* jerk-free soft-start accel over 1.5 s */
+    uint32_t stabilize_ticks = (uint32_t)(2.5f * 5000.0f);
+    uint32_t ramp_ticks = (uint32_t)(2.0f * 5000.0f);
     int move_divider = 0;
     
     for(uint32_t i = 0; i < stabilize_ticks; i++) {
@@ -267,8 +259,13 @@ run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_sem, float ta
         motor->current_sp = original_sp; 
     }
 
-    float time_needed_s = (CALIB_REVOLUTIONS * TWO_PI) / fabs(target_speed);
+    float time_needed_s = (CALIB_REVOLUTIONS * TWO_PI) / fabsf(target_speed);
     uint32_t calib_ticks = (uint32_t)(time_needed_s * 5000.0f);
+
+    float prog_iq = 0.0f, prog_w = 0.0f, prog_sp = 0.0f;
+    int   prog_n = 0;
+    float a_mark = sensor_get_angle(motor->sensor);
+    float a_unw  = 0.0f;
 
     for(uint32_t i = 0; i < calib_ticks; i++) {
         k_sem_take(foc_sem, K_FOREVER);
@@ -287,18 +284,56 @@ run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_sem, float ta
         bldc_motor_loop_foc(motor);
         motor->current_sp = original_sp; 
 
+        float da = angle - a_mark;
+        while (da >  3.141593f) da -= TWO_PI;
+        while (da < -3.141593f) da += TWO_PI;
+        a_unw += da;
+        a_mark = angle;
+
         float norm_angle = fmodf(angle, TWO_PI);
         if (norm_angle < 0.0f) norm_angle += TWO_PI;
         int index = (int)((norm_angle / TWO_PI) * SAMPLE_COUNT);
         if (index < 0) index = 0;
         if (index >= SAMPLE_COUNT) index = SAMPLE_COUNT - 1;
 
-        temp_sum[index] += original_sp;
+        /* Record the measured q current. At this speed the current loop tracks
+         * the velocity-PID request; current.q is what actually produces torque. */
+        temp_sum[index] += motor->current.q;
         temp_count[index]++;
+
+        prog_iq += motor->current.q;
+        prog_sp += original_sp;
+        prog_w  += sensor_get_velocity(motor->sensor);
+        prog_n++;
+        if ((i + 1) % 5000 == 0 && prog_n > 0) {
+            float net_w = a_unw / 1.0f; /* unwrapped angle over this 1 s window */
+            printk("     spin %+0.2f  t=%ds  net_w=%+.2f  pll_w=%+.2f  "
+                   "Iq=%+.0f mA  sp=%+.0f mA  angle=%.0f deg\n",
+                   (double)target_speed, (int)((i + 1) / 5000),
+                   (double)net_w,
+                   (double)(prog_w / (float)prog_n),
+                   (double)(prog_iq / (float)prog_n * 1000.0f),
+                   (double)(prog_sp / (float)prog_n * 1000.0f),
+                   (double)(norm_angle * (360.0f / TWO_PI)));
+            prog_iq = 0.0f; prog_w = 0.0f; prog_sp = 0.0f; prog_n = 0;
+            a_unw = 0.0f;
+        }
     }
 
     bldc_motor_move(motor, 0.0f);
     bldc_motor_loop_foc(motor);
+
+    /* Come to rest under closed-loop control. Leaving the last PWM on while
+     * the caller k_msleeps would keep driving the rotor. */
+    for (int t = 0; t < 1500; t++) {
+        k_sem_take(foc_sem, K_FOREVER);
+        sensor_update(motor->sensor);
+        if (++move_divider >= 5) {
+            move_divider = 0;
+            bldc_motor_move(motor, 0.0f);
+        }
+        bldc_motor_loop_foc(motor);
+    }
 
     for (int i = 0; i < SAMPLE_COUNT; i++) {
         if (temp_count[i] > 0) {
@@ -308,9 +343,10 @@ run_directional_calibration(bldc_motor_t *motor, struct k_sem *foc_sem, float ta
         }
     }
 }
+#endif /* !ANTICOGGING_POSITION_HOLD */
 
 /* Shared by both standstill calibration paths (ILC and single-pass detent). */
-#if ANTICOGGING_STATIC_CALIB
+#if ANTICOGGING_STATIC_CALIB && ANTICOGGING_POSITION_HOLD
 #define PI_F 3.14159265f
 
 static inline int angle_to_index(float angle)
@@ -323,6 +359,7 @@ static inline int angle_to_index(float angle)
     return idx;
 }
 
+#if PLANT_TRIES > 0
 /* Pulse `dir * amp` from rest and return the implied B, or 0 if the rotor never
  * broke away.
  *
@@ -399,6 +436,7 @@ static float plant_pulse_B(bldc_motor_t *motor, struct k_sem *foc_sem,
     if (!(omega > 0.05f) || !(ii > 1e-6f)) return 0.0f;
     return omega / ii;
 }
+#endif /* PLANT_TRIES > 0 */
 
 /* Establish B: the configured constant unless the pulse test corroborates it. */
 static float resolve_plant_gain(bldc_motor_t *motor, struct k_sem *foc_sem)
@@ -406,6 +444,7 @@ static float resolve_plant_gain(bldc_motor_t *motor, struct k_sem *foc_sem)
     const float b_nom = PLANT_B_NOMINAL;
     printk("---> PLANT GAIN: nominal B = %.0f rad/s^2/A\n", (double)b_nom);
 
+#if PLANT_TRIES > 0
     float amp = PLANT_PULSE_A;
     for (int attempt = 1; attempt <= PLANT_TRIES; attempt++) {
         float fwd = plant_pulse_B(motor, foc_sem, +1, amp);
@@ -439,52 +478,151 @@ static float resolve_plant_gain(bldc_motor_t *motor, struct k_sem *foc_sem)
     }
 
     printk("---> PLANT GAIN: falling back to nominal B = %.0f\n", (double)b_nom);
+#else
+    ARG_UNUSED(motor);
+    ARG_UNUSED(foc_sem);
+#endif
     return b_nom;
 }
 
-/* Derive the position-servo gains from the plant gain. */
+/* Quasi-static crawl gains. Plant B is logged only. */
 static void set_position_gains(float B)
 {
-    float wn = TWO_PI * STATIC_POS_BW_HZ;
+    pos_kp = POS_KP;
+    pos_ki = POS_KI;
+    pos_kd = POS_KD;
 
-    pos_kp = POS_GAIN_SCALE * (wn * wn) / B;
-    pos_kd = POS_GAIN_SCALE * (2.0f * STATIC_POS_ZETA * wn) / B;
-    pos_ki = POS_GAIN_SCALE * (wn * pos_kp) / 4.0f;
-
-    printk("---> POS SERVO: B=%.0f bw %.1f Hz zeta %.2f scale %.2f -> "
-           "KP=%.4f A/rad  KI=%.4f A/(rad*s)  KD=%.5f A/(rad/s)\n",
-           (double)B, (double)STATIC_POS_BW_HZ, (double)STATIC_POS_ZETA,
-           (double)POS_GAIN_SCALE,
-           (double)pos_kp, (double)pos_ki, (double)pos_kd);
+    printk("---> POS SERVO: voltage steps  Uq=I*R  B=%.0f  KP=%.2f A/rad  "
+           "KI=%.1f A/(rad*s)  slew=%.1f A/s  crawl=%.0f mA  arrive=%.1f deg\n",
+           (double)B, (double)pos_kp, (double)pos_ki,
+           (double)POS_SLEW_A_PER_S,
+           (double)(CRAWL_A * 1000.0f),
+           (double)(ARRIVE_RAD * 180.0f / PI_F));
 }
 
-/* Hold the present angle and report how well it holds. Runs the same control law
- * as the sweep, so a clean result here is a genuine go-ahead. */
-static void probe_position_hold(bldc_motor_t *motor, struct k_sem *foc_sem)
+static float d_lpf_y = 0.0f;
+
+static void hold_reset_d_lpf(void)
+{
+    d_lpf_y = 0.0f;
+}
+
+/* Forward-only PI + slew. Never torques against `dir`: after a crest jump the
+ * old bipolar PI braked to ~30 mA and parked in the next well. */
+static float hold_current(bldc_motor_t *motor, float err, float *integ,
+                          float pos_ts, float ff, float *last_cmd, int dir)
+{
+    float vel_raw = sensor_get_velocity(motor->sensor);
+    float tf = 1.0f / (TWO_PI * D_LPF_HZ);
+    float alpha = pos_ts / (tf + pos_ts);
+    d_lpf_y += alpha * (vel_raw - d_lpf_y);
+
+    float fdir = (float)dir;
+
+    if (pos_ki > 1e-6f) {
+        /* Integrate only while behind the target. */
+        if (err * fdir > 0.0f) {
+            *integ += err * pos_ts;
+        }
+        if (dir > 0 && *integ < 0.0f) *integ = 0.0f;
+        if (dir < 0 && *integ > 0.0f) *integ = 0.0f;
+        float integ_lim = motor->current_limit / pos_ki;
+        if (*integ >  integ_lim) *integ =  integ_lim;
+        if (*integ < -integ_lim) *integ = -integ_lim;
+    } else {
+        *integ = 0.0f;
+    }
+
+    float pi = pos_kp * err + pos_ki * (*integ);
+    if (dir > 0 && pi < 0.0f) pi = 0.0f;
+    if (dir < 0 && pi > 0.0f) pi = 0.0f;
+
+    float iq = pi + ff;
+    float max_step = POS_SLEW_A_PER_S * pos_ts;
+    float lo = *last_cmd - max_step;
+    float hi = *last_cmd + max_step;
+    if (iq < lo) iq = lo;
+    if (iq > hi) iq = hi;
+    *last_cmd = iq;
+
+    float cur = iq - pos_kd * d_lpf_y;
+    if (dir > 0 && cur < 0.0f) cur = 0.0f;
+    if (dir < 0 && cur > 0.0f) cur = 0.0f;
+    if (cur >  motor->current_limit) cur =  motor->current_limit;
+    if (cur < -motor->current_limit) cur = -motor->current_limit;
+    return cur;
+}
+
+/* Map the holding-current command onto a voltage. Current-mode at standstill
+ * cancels BEMF and rings the 28 Hz detent spring; a voltage source damps it. */
+static void apply_iq_as_voltage(bldc_motor_t *motor, float iq_cmd)
+{
+    float r = motor->phase_resistance;
+    if (!(r > 0.5f) || r > 20.0f) {
+        r = 3.4f;
+    }
+    float uq = iq_cmd * r;
+    if (uq >  motor->voltage_limit) uq =  motor->voltage_limit;
+    if (uq < -motor->voltage_limit) uq = -motor->voltage_limit;
+    motor->voltage.q  = uq;
+    motor->voltage.d  = 0.0f;
+    motor->current_sp = iq_cmd;
+}
+
+static void enable_voltage_drive(bldc_motor_t *motor)
+{
+    bldc_motor_reset_current_loop_state(motor);
+    motor->torque_controller = VOLTAGE;
+    motor->voltage.q = 0.0f;
+    motor->voltage.d = 0.0f;
+    bldc_motor_set_bridge_hiz(motor, false);
+    k_busy_wait(20);
+}
+
+static void coast_bridge(bldc_motor_t *motor)
+{
+    motor->voltage.q  = 0.0f;
+    motor->voltage.d  = 0.0f;
+    motor->current_sp = 0.0f;
+    bldc_motor_set_bridge_hiz(motor, true);
+}
+
+static float begin_standstill_observer(bldc_motor_t *motor, struct k_sem *foc_sem)
+{
+    printk("---> standstill: observer %.0f Hz, Hi-Z coast (INL low)\n",
+           (double)sensor_get_observer_bw());
+
+    /* current_sp=0 with the bridge ON shorts the windings through SVPWM.
+     * Detent spring + inertia + short = 28 Hz ring at ~230 mA. Coast instead
+     * so the rotor falls into a well on mechanical damping only. */
+    bldc_motor_reset_current_loop_state(motor);
+    bldc_motor_set_bridge_hiz(motor, true);
+
+    int idle = (int)(0.50f * STATIC_FOC_HZ);
+    for (int t = 0; t < idle; t++) {
+        k_sem_take(foc_sem, K_FOREVER);
+        sensor_update(motor->sensor);
+    }
+    return sensor_get_observer_bw();
+}
+
+/* Measure standstill while Hi-Z. Do not run the current PI here. */
+static bool probe_position_hold(bldc_motor_t *motor, struct k_sem *foc_sem)
 {
     const uint32_t pos_div = (uint32_t)(STATIC_FOC_HZ / STATIC_POS_HZ);
-    const float    pos_ts  = (float)pos_div / STATIC_FOC_HZ;
-    const int      skip    = POS_PROBE_TICKS / 3;   /* ignore the initial transient */
-
-    pid_controller_reset(&motor->pid_current_q);
-    pid_controller_reset(&motor->pid_current_d);
+    const int      skip    = POS_PROBE_TICKS / 3;
 
     sensor_update(motor->sensor);
     float target = sensor_get_angle(motor->sensor);
-    float a_prev = target;
-    float vel_f = 0.0f, integ = 0.0f;
 
     float err_sum = 0.0f, err_sq = 0.0f, err_min = 1e9f, err_max = -1e9f;
-    float cur_sq = 0.0f, cur_pk = 0.0f;
-    int   n = 0, crossings = 0, railed = 0;
+    int   n = 0, crossings = 0;
     float err_prev_ac = 0.0f;
 
     for (int k = 0; k < POS_PROBE_TICKS; k++) {
-        /* One position update per pos_div FOC ticks, exactly as in the sweep. */
         for (uint32_t s = 0; s < pos_div; s++) {
             k_sem_take(foc_sem, K_FOREVER);
             sensor_update(motor->sensor);
-            bldc_motor_loop_foc(motor);
         }
 
         float a   = sensor_get_angle(motor->sensor);
@@ -492,33 +630,12 @@ static void probe_position_hold(bldc_motor_t *motor, struct k_sem *foc_sem)
         while (err >  PI_F) err -= TWO_PI;
         while (err < -PI_F) err += TWO_PI;
 
-        float da = a - a_prev;
-        while (da >  PI_F) da -= TWO_PI;
-        while (da < -PI_F) da += TWO_PI;
-        a_prev = a;
-        vel_f += STATIC_VEL_ALPHA * (da / pos_ts - vel_f);
-
-        integ += err * pos_ts;
-        float integ_lim = motor->current_limit / pos_ki;
-        if (integ >  integ_lim) integ =  integ_lim;
-        if (integ < -integ_lim) integ = -integ_lim;
-
-        float cur = pos_kp * err + pos_ki * integ - pos_kd * vel_f;
-        if (cur >  motor->current_limit) { cur =  motor->current_limit; if (k >= skip) railed++; }
-        if (cur < -motor->current_limit) { cur = -motor->current_limit; if (k >= skip) railed++; }
-        motor->current_sp = cur;
-
         if (k >= skip) {
             err_sum += err;
             err_sq  += err * err;
             if (err < err_min) err_min = err;
             if (err > err_max) err_max = err;
 
-            float iq = motor->current.q;
-            cur_sq += iq * iq;
-            if (fabsf(iq) > cur_pk) cur_pk = fabsf(iq);
-
-            /* Count sign changes of the AC part to get the ringing frequency. */
             float ac = err - err_sum / (float)(n + 1);
             if ((ac > 0.0f) != (err_prev_ac > 0.0f)) crossings++;
             err_prev_ac = ac;
@@ -526,10 +643,9 @@ static void probe_position_hold(bldc_motor_t *motor, struct k_sem *foc_sem)
         }
     }
 
-    motor->current_sp = 0.0f;
-    bldc_motor_loop_foc(motor);
-
-    if (n < 2) return;
+    if (n < 2) {
+        return true;
+    }
 
     float mean   = err_sum / (float)n;
     float rms    = sqrtf(err_sq / (float)n - mean * mean);
@@ -537,26 +653,23 @@ static void probe_position_hold(bldc_motor_t *motor, struct k_sem *foc_sem)
     float span_s = (float)n / STATIC_POS_HZ;
     float freq   = (float)crossings / (2.0f * span_s);
 
-    printk("---> HOLD PROBE: err rms %.2f mrad  pk-pk %.2f mrad  bias %.2f mrad\n",
+    printk("---> REST PROBE (Hi-Z): err rms %.2f mrad  pk-pk %.2f mrad  bias %.2f mrad\n",
            (double)(rms * 1000.0f), (double)(pkpk * 1000.0f), (double)(mean * 1000.0f));
-    printk("---> HOLD PROBE: ring %.1f Hz  Iq rms %.0f mA  peak %.0f mA  railed %d/%d\n",
-           (double)freq, (double)(sqrtf(cur_sq / (float)n) * 1000.0f),
-           (double)(cur_pk * 1000.0f), railed, n);
+    printk("---> REST PROBE: ring %.1f Hz (bridge open, Iq not driven)\n",
+           (double)freq);
 
-    /* One LUT bin is 2*pi/500 = 12.6 mrad, so oscillation beyond a few mrad
-     * smears the measurement across neighbouring bins even when it is bounded. */
-    if (pkpk > 0.020f || railed > n / 20) {
-        printk("---> HOLD PROBE: UNSTABLE - do not trust the sweep. Ringing near "
-               "%.0f Hz; reduce POS_GAIN_SCALE (or STATIC_POS_BW_HZ) and retry.\n",
-               (double)freq);
-    } else {
-        printk("---> HOLD PROBE: stable, hold is within one LUT bin.\n");
+    /* Only refuse if the shaft is free-spinning. Detent tremble is expected. */
+    if (pkpk > 1.0f) {
+        printk("---> REST PROBE: shaft is spinning - abort.\n");
+        return false;
     }
+    printk("---> REST PROBE: proceeding to sweep (voltage drive, no current PI).\n");
+    return true;
 }
 
 #if ANTICOGGING_USE_ILC
-/* One standstill sweep in direction `dir`, applying `ff_lut` as feed-forward and
- * recording the MEASURED holding current per bin into out_meas. */
+/* Event-based 0.72° steps. Wait until the shaft reaches the next bin (or skip
+ * if a crest already threw us past it). Record I_cmd at arrival. */
 static void run_ilc_hold_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
                                int dir, const float *ff_lut, float *out_meas)
 {
@@ -564,119 +677,153 @@ static void run_ilc_hold_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
     static uint16_t cnt_bin[SAMPLE_COUNT];
     for (int i = 0; i < SAMPLE_COUNT; i++) { sum_bin[i] = 0.0f; cnt_bin[i] = 0; }
 
-    uint32_t settle_ticks  = (uint32_t)(STATIC_SETTLE_MS  * 5);
-    uint32_t measure_ticks = (uint32_t)(STATIC_MEASURE_MS * 5);
-    const uint32_t pos_div = (uint32_t)(STATIC_FOC_HZ / STATIC_POS_HZ); /* 10 @ 5 kHz / 500 Hz */
+    uint32_t timeout_ticks = (uint32_t)(STEP_TIMEOUT_MS  * STATIC_FOC_HZ_I / 1000);
+    uint32_t measure_ticks = (uint32_t)(STATIC_MEASURE_MS * STATIC_FOC_HZ_I / 1000);
+    const uint32_t pos_div = (uint32_t)(STATIC_FOC_HZ / STATIC_POS_HZ);
     const float    pos_ts  = (float)pos_div / STATIC_FOC_HZ;
+    const float    fdir    = (float)dir;
 
-    pid_controller_reset(&motor->pid_current_q);
-    pid_controller_reset(&motor->pid_current_d);
+    bldc_motor_reset_current_loop_state(motor);
+    hold_reset_d_lpf();
+
+    printk("     hold sweep dir %+d  (%d event-steps, %.2f deg/step, Uq=I*R)\n",
+           dir, STATIC_POINTS, (double)(360.0f / (float)STATIC_POINTS));
 
     sensor_update(motor->sensor);
-    float start_angle   = sensor_get_angle(motor->sensor);
-    float target_prev   = start_angle;
-    float a_prev        = start_angle;
-    float vel_f         = 0.0f;
-    float last_meas_cur = 0.0f;
-    motor->current_sp   = 0.0f;
+    float start_angle = sensor_get_angle(motor->sensor);
+    float last_cmd    = 0.0f;
+    float integ       = 0.0f;
+    float a_prev      = start_angle;
+    float travel_acc  = 0.0f;
+    motor->current_sp = 0.0f;
 
-    /* Progress accounting: a full sweep is ~95 s, so print often enough to see a
-     * divergence early instead of waiting for the LUT dump. */
+    enable_voltage_drive(motor);
+
     float prog_err = 0.0f, prog_cur = 0.0f;
-    int   prog_n = 0, prog_railed = 0;
+    int   prog_n = 0, prog_railed = 0, prog_skip = 0, last_print = 0;
 
-    for (int p = 0; p < STATIC_POINTS; p++) {
-        float frac   = (float)p / (float)STATIC_POINTS;
-        float target = start_angle + (float)dir * frac * TWO_PI;
+    for (int p = 0; p < STATIC_POINTS; ) {
+        float target = start_angle + fdir * (float)p / (float)STATIC_POINTS * TWO_PI;
 
-        float integ     = last_meas_cur / pos_ki;
-        float point_sum = 0.0f;
-        int   point_cnt = 0;
-        uint32_t pos_div_cnt = pos_div; /* run the position law on the first FOC tick */
+        k_sem_take(foc_sem, K_FOREVER);
+        sensor_update(motor->sensor);
+        float a = sensor_get_angle(motor->sensor);
+        {
+            float da = a - a_prev;
+            while (da >  PI_F) da -= TWO_PI;
+            while (da < -PI_F) da += TWO_PI;
+            travel_acc += da;
+            a_prev = a;
+        }
 
-        for (uint32_t t = 0; t < settle_ticks + measure_ticks; t++) {
-            k_sem_take(foc_sem, K_FOREVER);
-            sensor_update(motor->sensor);
-            float a = sensor_get_angle(motor->sensor);
+        float err = target - a;
+        while (err >  PI_F) err -= TWO_PI;
+        while (err < -PI_F) err += TWO_PI;
 
-            /* Position/damping loop at SENSOR rate. */
-            if (++pos_div_cnt >= pos_div) {
-                pos_div_cnt = 0;
-
-                float tgt = target;
-                if (t < settle_ticks) {
-                    float r = (float)t / (float)settle_ticks;
-                    r = r * r * (3.0f - 2.0f * r);
-                    tgt = target_prev + (target - target_prev) * r;
-                }
-
-                float err = tgt - a;
-                while (err >  PI_F) err -= TWO_PI;
-                while (err < -PI_F) err += TWO_PI;
-
+        /* Crest jump already carried us past this bin: skip, do not sit. */
+        if (err * fdir < -ARRIVE_RAD) {
+            integ = 0.0f;
+            last_cmd = 0.0f;
+            apply_iq_as_voltage(motor, 0.0f);
+            bldc_motor_loop_foc(motor);
+            prog_skip++;
+            p++;
+        } else {
+        uint32_t pos_div_cnt = pos_div;
+        bool arrived = (fabsf(err) < ARRIVE_RAD);
+        for (uint32_t t = 0; t < timeout_ticks && !arrived; t++) {
+            if (t > 0) {
+                k_sem_take(foc_sem, K_FOREVER);
+                sensor_update(motor->sensor);
+                a = sensor_get_angle(motor->sensor);
                 float da = a - a_prev;
                 while (da >  PI_F) da -= TWO_PI;
                 while (da < -PI_F) da += TWO_PI;
+                travel_acc += da;
                 a_prev = a;
-                vel_f += STATIC_VEL_ALPHA * (da / pos_ts - vel_f);
+            }
 
-                integ += err * pos_ts;
+            if (++pos_div_cnt >= pos_div) {
+                pos_div_cnt = 0;
+                err = target - a;
+                while (err >  PI_F) err -= TWO_PI;
+                while (err < -PI_F) err += TWO_PI;
 
-                float integ_lim = motor->current_limit / pos_ki;
-                if (integ >  integ_lim) integ =  integ_lim;
-                if (integ < -integ_lim) integ = -integ_lim;
-
-                /* Feed-forward is applied for the WHOLE point, settle included.
-                 * Switching it on at the measurement instant instead injected a
-                 * step disturbance exactly when the reading started, so the
-                 * integrator was still absorbing it throughout the window. */
-                float ff = ff_lut ? ff_lut[angle_to_index(a)] : 0.0f;
-
-                float cur = pos_kp * err + pos_ki * integ - pos_kd * vel_f + ff;
-
-                if (cur >  motor->current_limit) { cur =  motor->current_limit; prog_railed++; }
-                if (cur < -motor->current_limit) { cur = -motor->current_limit; prog_railed++; }
-
-                motor->current_sp = cur;
-
-                if (t >= settle_ticks) {
-                    prog_err += fabsf(err);
-                    prog_cur += fabsf(cur);
-                    prog_n++;
+                if (err * fdir < -ARRIVE_RAD) {
+                    integ = 0.0f;
+                    apply_iq_as_voltage(motor, 0.0f);
+                    arrived = true;
+                } else {
+                    float ff = (ff_lut ? ff_lut[angle_to_index(a)] : 0.0f)
+                               + CRAWL_A * fdir;
+                    float cur = hold_current(motor, err, &integ, pos_ts, ff,
+                                             &last_cmd, dir);
+                    if (cur == motor->current_limit || cur == -motor->current_limit) {
+                        prog_railed++;
+                    }
+                    apply_iq_as_voltage(motor, cur);
+                    if (fabsf(err) < ARRIVE_RAD && fabsf(d_lpf_y) < 0.5f) {
+                        arrived = true;
+                    }
                 }
             }
-
             bldc_motor_loop_foc(motor);
-
-            if (t >= settle_ticks) {
-                int idx = angle_to_index(a);
-                /* Record the MEASURED q current, not the request. At standstill
-                 * the current the machine actually carries is what balances the
-                 * detent; current_sp diverges from it whenever the loop clamps or
-                 * has not caught up, and those are exactly the points where the
-                 * detent is strongest. */
-                float meas = motor->current.q;
-                sum_bin[idx] += meas;
-                cnt_bin[idx]++;
-                point_sum += meas;
-                point_cnt++;
-            }
         }
 
-        if (point_cnt > 0) last_meas_cur = point_sum / (float)point_cnt;
-        target_prev = target;
+        /* Measure I_cmd at this angle (commanded current = detent estimate). */
+        for (uint32_t t = 0; t < measure_ticks; t++) {
+            k_sem_take(foc_sem, K_FOREVER);
+            sensor_update(motor->sensor);
+            a = sensor_get_angle(motor->sensor);
+            {
+                float da = a - a_prev;
+                while (da >  PI_F) da -= TWO_PI;
+                while (da < -PI_F) da += TWO_PI;
+                travel_acc += da;
+                a_prev = a;
+            }
+            if (++pos_div_cnt >= pos_div) {
+                pos_div_cnt = 0;
+                err = target - a;
+                while (err >  PI_F) err -= TWO_PI;
+                while (err < -PI_F) err += TWO_PI;
+                float ff = (ff_lut ? ff_lut[angle_to_index(a)] : 0.0f)
+                           + CRAWL_A * fdir;
+                if (err * fdir < 0.0f) {
+                    apply_iq_as_voltage(motor, 0.0f);
+                } else {
+                    float cur = hold_current(motor, err, &integ, pos_ts, ff,
+                                             &last_cmd, dir);
+                    apply_iq_as_voltage(motor, cur);
+                }
+                prog_err += fabsf(err);
+                prog_cur += fabsf(motor->current_sp);
+                prog_n++;
+            }
+            bldc_motor_loop_foc(motor);
+            int idx = angle_to_index(a);
+            sum_bin[idx] += motor->current_sp;
+            cnt_bin[idx]++;
+        }
 
-        if ((p + 1) % 100 == 0 && prog_n > 0) {
-            printk("     dir %+d  point %d/%d  |err| %.2f mrad  |Iq| %.0f mA  railed %d\n",
-                   dir, p + 1, STATIC_POINTS,
-                   (double)(prog_err / (float)prog_n * 1000.0f),
-                   (double)(prog_cur / (float)prog_n * 1000.0f), prog_railed);
-            prog_err = 0.0f; prog_cur = 0.0f; prog_n = 0; prog_railed = 0;
+        p++;
+        } /* else: not skipped */
+
+        if (p >= last_print + 50) {
+            printk("     dir %+d  point %d/%d  |err| %.2f mrad  |Iq| %.0f mA  "
+                   "travel %.1f deg  skip %d  railed %d\n",
+                   dir, p, STATIC_POINTS,
+                   prog_n > 0 ? (double)(prog_err / (float)prog_n * 1000.0f) : 0.0,
+                   prog_n > 0 ? (double)(prog_cur / (float)prog_n * 1000.0f) : 0.0,
+                   (double)(travel_acc * (180.0f / PI_F)),
+                   prog_skip, prog_railed);
+            prog_err = 0.0f; prog_cur = 0.0f; prog_n = 0;
+            prog_railed = 0; prog_skip = 0;
+            last_print = p;
         }
     }
 
-    motor->current_sp = 0.0f;
-    bldc_motor_loop_foc(motor);
+    coast_bridge(motor);
 
     float last = 0.0f;
     for (int i = 0; i < SAMPLE_COUNT; i++) {
@@ -687,7 +834,7 @@ static void run_ilc_hold_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
 
 /* Iterative position-hold calibration. Each iteration: sweep fwd+bwd with the
  * current LUT as FF, average (cancels friction), relax the LUT toward it. */
-static void anticogging_calibrate_ilc(bldc_motor_t *motor, struct k_sem *foc_sem)
+static int anticogging_calibrate_ilc(bldc_motor_t *motor, struct k_sem *foc_sem)
 {
     static float meas_fwd[SAMPLE_COUNT];
     static float meas_bwd[SAMPLE_COUNT];
@@ -698,7 +845,7 @@ static void anticogging_calibrate_ilc(bldc_motor_t *motor, struct k_sem *foc_sem
     float s_cl = motor->current_limit;
 
     motor->controller        = TORQUE;
-    motor->torque_controller = FOC_CURRENT;
+    motor->torque_controller = VOLTAGE;
 
     /* Never raise the limit above what the caller left in place: the locked-rotor
      * test lowers it to the largest current at which both low-side shunts are
@@ -707,11 +854,24 @@ static void anticogging_calibrate_ilc(bldc_motor_t *motor, struct k_sem *foc_sem
                          ? s_cl : STATIC_HOLD_CURRENT_LIMIT;
 
     printk("---> ITERATIVE POSITION-HOLD CALIBRATION START (%d iters, %d points, "
-           "current limit %.0f mA)\n",
-           ILC_ITERATIONS, STATIC_POINTS, (double)(motor->current_limit * 1000.0f));
+           "%.2f deg/step, event-wait %d ms, current limit %.0f mA, voltage drive)\n",
+           ILC_ITERATIONS, STATIC_POINTS,
+           (double)(360.0f / (float)STATIC_POINTS),
+           STEP_TIMEOUT_MS,
+           (double)(motor->current_limit * 1000.0f));
 
+    float saved_pll = begin_standstill_observer(motor, foc_sem);
     set_position_gains(resolve_plant_gain(motor, foc_sem));
-    probe_position_hold(motor, foc_sem);
+    if (!probe_position_hold(motor, foc_sem)) {
+        coast_bridge(motor);
+        motor->controller        = s_ctrl;
+        motor->torque_controller = s_torque;
+        motor->current_limit     = s_cl;
+        sensor_set_observer_bw(saved_pll);
+        bldc_motor_set_bridge_hiz(motor, false);
+        printk("!!! ANTICOG: calibration aborted (hold unstable). LUT not stored.\n");
+        return -1;
+    }
 
     for (int iter = 1; iter <= ILC_ITERATIONS; iter++) {
         run_ilc_hold_sweep(motor, foc_sem, +1, final_lut, meas_fwd);
@@ -741,16 +901,21 @@ static void anticogging_calibrate_ilc(bldc_motor_t *motor, struct k_sem *foc_sem
     for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] -= mean;
 
     motor->current_sp = 0.0f;
-    bldc_motor_loop_foc(motor);
+    motor->voltage.q  = 0.0f;
+    motor->voltage.d  = 0.0f;
+    bldc_motor_reset_current_loop_state(motor);
     motor->controller        = s_ctrl;
     motor->torque_controller = s_torque;
     motor->current_limit     = s_cl;
+    sensor_set_observer_bw(saved_pll);
+    bldc_motor_set_bridge_hiz(motor, false);
 
     printk("---> ILC DONE (DC bias removed: %.5f)\n", (double)mean);
     printk("=== START LUT DUMP ===\nIndex,Current_A\n");
     for (int i = 0; i < SAMPLE_COUNT; i++) printk("%d,%f\n", i, (double)final_lut[i]);
     printk("=== END LUT DUMP ===\n");
     k_msleep(1000);
+    return 0;
 }
 #endif /* ANTICOGGING_USE_ILC */
 
@@ -766,20 +931,22 @@ static void run_static_detent_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
     static uint16_t cnt_bin[SAMPLE_COUNT];
     for (int i = 0; i < SAMPLE_COUNT; i++) { sum_bin[i] = 0.0f; cnt_bin[i] = 0; }
 
-    uint32_t settle_ticks  = (uint32_t)(STATIC_SETTLE_MS  * 5); /* 5 ticks/ms @5kHz */
-    uint32_t measure_ticks = (uint32_t)(STATIC_MEASURE_MS * 5);
+    uint32_t ramp_ticks    = (uint32_t)(STATIC_RAMP_MS    * STATIC_FOC_HZ_I / 1000);
+    uint32_t settle_ticks  = (uint32_t)(STATIC_SETTLE_MS  * STATIC_FOC_HZ_I / 1000);
+    uint32_t measure_ticks = (uint32_t)(STATIC_MEASURE_MS * STATIC_FOC_HZ_I / 1000);
+    uint32_t total_ticks   = ramp_ticks + settle_ticks + measure_ticks;
     const uint32_t pos_div = (uint32_t)(STATIC_FOC_HZ / STATIC_POS_HZ);
     const float    pos_ts  = (float)pos_div / STATIC_FOC_HZ;
 
-    pid_controller_reset(&motor->pid_current_q);
-    pid_controller_reset(&motor->pid_current_d);
+    bldc_motor_reset_current_loop_state(motor);
+    hold_reset_d_lpf();
+    enable_voltage_drive(motor);
 
     sensor_update(motor->sensor);
     float start_angle   = sensor_get_angle(motor->sensor);
     float target_prev   = start_angle;
-    float a_prev        = start_angle;
-    float vel_f         = 0.0f;
     float last_meas_cur = 0.0f;  /* warm-start for next point's integrator */
+    float last_cmd      = 0.0f;
     motor->current_sp   = 0.0f;
 
     for (int p = 0; p < STATIC_POINTS; p++) {
@@ -793,7 +960,7 @@ static void run_static_detent_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
         int   point_cnt = 0;
         uint32_t pos_div_cnt = pos_div;
 
-        for (uint32_t t = 0; t < settle_ticks + measure_ticks; t++) {
+        for (uint32_t t = 0; t < total_ticks; t++) {
             k_sem_take(foc_sem, K_FOREVER);
             sensor_update(motor->sensor);
             float a = sensor_get_angle(motor->sensor);
@@ -801,12 +968,10 @@ static void run_static_detent_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
             if (++pos_div_cnt >= pos_div) {
                 pos_div_cnt = 0;
 
-                /* Ramp the setpoint from the previous point (smoothstep) so the rotor
-                 * creeps over the detent instead of snapping between discrete steps;
-                 * hold fixed during the measure window for a true standstill reading. */
+                /* Smoothstep bump to the next bin; then hold still for settle+measure. */
                 float tgt = target;
-                if (t < settle_ticks) {
-                    float r = (float)t / (float)settle_ticks;
+                if (t < ramp_ticks) {
+                    float r = (float)t / (float)ramp_ticks;
                     r = r * r * (3.0f - 2.0f * r);
                     tgt = target_prev + (target - target_prev) * r;
                 }
@@ -815,28 +980,13 @@ static void run_static_detent_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
                 while (err >  PI_F) err -= TWO_PI;
                 while (err < -PI_F) err += TWO_PI;
 
-                float da = a - a_prev;
-                while (da >  PI_F) da -= TWO_PI;
-                while (da < -PI_F) da += TWO_PI;
-                a_prev = a;
-                vel_f += STATIC_VEL_ALPHA * (da / pos_ts - vel_f);
-
-                integ += err * pos_ts;
-
-                float integ_lim = motor->current_limit / pos_ki;
-                if (integ >  integ_lim) integ =  integ_lim;
-                if (integ < -integ_lim) integ = -integ_lim;
-
-                float cur = pos_kp * err + pos_ki * integ - pos_kd * vel_f;
-                if (cur >  motor->current_limit) cur =  motor->current_limit;
-                if (cur < -motor->current_limit) cur = -motor->current_limit;
-
-                motor->current_sp = cur;
+                float cur = hold_current(motor, err, &integ, pos_ts, 0.0f, &last_cmd, dir);
+                apply_iq_as_voltage(motor, cur);
             }
 
             bldc_motor_loop_foc(motor);
 
-            if (t >= settle_ticks) {                  /* rotor settled: measure */
+            if (t >= ramp_ticks + settle_ticks) {
                 float na = fmodf(a, TWO_PI);
                 if (na < 0.0f) na += TWO_PI;
                 int idx = (int)((na / TWO_PI) * SAMPLE_COUNT);
@@ -854,8 +1004,7 @@ static void run_static_detent_sweep(bldc_motor_t *motor, struct k_sem *foc_sem,
         target_prev = target;
     }
 
-    motor->current_sp = 0.0f;
-    bldc_motor_loop_foc(motor);
+    coast_bridge(motor);
 
     float last = 0.0f;                                /* carry-forward gap fill */
     for (int i = 0; i < SAMPLE_COUNT; i++) {
@@ -876,12 +1025,13 @@ static void anticogging_calibrate_static_detent(bldc_motor_t *motor, struct k_se
     torque_control_type_t saved_torque = motor->torque_controller;
     float saved_c_limit = motor->current_limit;
     motor->controller = TORQUE;
-    motor->torque_controller = FOC_CURRENT;
+    motor->torque_controller = VOLTAGE;
     motor->current_limit = (saved_c_limit < STATIC_HOLD_CURRENT_LIMIT)
                          ? saved_c_limit : STATIC_HOLD_CURRENT_LIMIT;
 
-    printk("---> STATIC DETENT CALIBRATION START (%d points)\n", STATIC_POINTS);
+    printk("---> STATIC DETENT CALIBRATION START (%d points, voltage drive)\n", STATIC_POINTS);
 
+    float saved_pll = begin_standstill_observer(motor, foc_sem);
     set_position_gains(resolve_plant_gain(motor, foc_sem));
     probe_position_hold(motor, foc_sem);
 
@@ -904,10 +1054,14 @@ static void anticogging_calibrate_static_detent(bldc_motor_t *motor, struct k_se
     for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] -= lut_mean;
 
     motor->current_sp = 0.0f;
-    bldc_motor_loop_foc(motor);
+    motor->voltage.q  = 0.0f;
+    motor->voltage.d  = 0.0f;
+    bldc_motor_reset_current_loop_state(motor);
     motor->controller = saved_ctrl;
     motor->torque_controller = saved_torque;
     motor->current_limit = saved_c_limit;
+    sensor_set_observer_bw(saved_pll);
+    bldc_motor_set_bridge_hiz(motor, false);
 
     printk("---> STATIC DETENT CALIBRATION DONE\n");
     printk("=== START LUT DUMP ===\n");
@@ -919,7 +1073,7 @@ static void anticogging_calibrate_static_detent(bldc_motor_t *motor, struct k_se
     k_msleep(1000);
 }
 #endif /* !ANTICOGGING_USE_ILC */
-#endif /* ANTICOGGING_STATIC_CALIB */
+#endif /* ANTICOGGING_STATIC_CALIB && ANTICOGGING_POSITION_HOLD */
 
 /* ================= Persistent LUT storage (raw NVS in settings_storage) =========
  * The calibrated map is kept in a dedicated flash partition so it survives
@@ -1015,6 +1169,134 @@ int anticogging_flash_load_zero_angle(float *angle)
     return 0;
 }
 
+#if !ANTICOGGING_POSITION_HOLD
+/* Slow constant-speed map. Bidirectional average cancels friction; the remaining
+ * current vs angle is the detent cogging profile.
+ *
+ * Note on shaft speed: the sensor magnet is coupled at 0.5x shaft speed, so
+ * pll_omega = 0.5 * mechanical_omega. The velocity loop therefore drives the
+ * shaft to 2 * CALIB_SPEED_RAD_S (~6.28 rad/s actual). At that speed cogging
+ * is at 36 Hz. The observer is temporarily raised to CALIB_PLL_FN_HZ (80 Hz)
+ * so velocity ripple from cogging is tracked with only 7% attenuation instead
+ * of 73%, giving a LUT that is 93% of the true cogging amplitude. */
+static void anticogging_calibrate_spin(bldc_motor_t *motor, struct k_sem *foc_sem)
+{
+    static float lut_cw[SAMPLE_COUNT];
+    static float lut_ccw[SAMPLE_COUNT];
+    static float residual[SAMPLE_COUNT];
+    static float accum[SAMPLE_COUNT];
+
+    float saved_kp = motor->pid_velocity.p;
+    float saved_ki = motor->pid_velocity.i;
+    float saved_v_limit = motor->pid_velocity.limit;
+    float saved_c_limit = motor->current_limit;
+    float saved_vel_ts = motor->lpf_velocity.Ts;
+    float saved_vel_tf = motor->lpf_velocity.tf;
+    float saved_pid_ts = motor->pid_velocity.Ts;
+    float saved_out_ramp = motor->pid_velocity.output_ramp;
+    motion_control_type_t saved_controller = motor->controller;
+    motor->controller = VELOCITY;
+    motor->torque_controller = FOC_CURRENT;
+
+    /* At 2 rad/s inertia carries the rotor through each tooth; the velocity
+     * loop only needs to maintain average speed against friction. These are
+     * the empirical gains from the original working calibration code. The
+     * IMC formula (KP = 2*zeta*wn/B) with B=14600 gives KP=0.0046 at 6 Hz,
+     * which produces only 1.8 mA per 0.4 rad/s error – orders of magnitude
+     * too small to maintain speed against ~100 mA of friction. */
+    motor->pid_velocity.p = 0.05f;
+    motor->pid_velocity.i = 0.02f;
+    motor->pid_velocity.d = 0.0f;
+    motor->pid_velocity.limit = motor->current_limit;
+    motor->pid_velocity.output_ramp = 0.0f;
+    motor->pid_velocity.Ts = 0.001f;       /* move() runs at 1 kHz */
+    /* The 20 Hz PLL attenuates the 36 Hz cogging velocity ripple down to ~27%,
+     * but it also cushions the velocity loop against reacting to individual cogging
+     * teeth. Without this filter the loop becomes unstable or stalls the motor.
+     * tf=0.003 gives ≈53 Hz cutoff; combined with the 20 Hz PLL this keeps the
+     * velocity-loop phase margin around +55°. */
+    motor->lpf_velocity.Ts = 0.001f;
+    motor->lpf_velocity.tf = 0.003f;
+    motor->lpf_velocity.y_prev = 0.0f;
+
+    printk("---> SLOW-SPIN CALIBRATION START (%d averages, %.2f rad/s, "
+           "vel KP=%.4f KI=%.3f, Ilim=%.0f mA)\n",
+           CALIB_AVERAGES, (double)CALIB_SPEED_RAD_S,
+           (double)motor->pid_velocity.p, (double)motor->pid_velocity.i,
+           (double)(motor->current_limit * 1000.0f));
+
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        final_lut[i] = 0.0f;
+        accum[i] = 0.0f;
+    }
+
+    float clamp = motor->current_limit;
+    for (int pass = 1; pass <= CALIB_AVERAGES; pass++) {
+        printk("---> PASS %d / %d ---\n", pass, CALIB_AVERAGES);
+
+        run_directional_calibration(motor, foc_sem,  CALIB_SPEED_RAD_S, lut_cw);
+        k_msleep(400);
+        run_directional_calibration(motor, foc_sem, -CALIB_SPEED_RAD_S, lut_ccw);
+
+        float sum_abs = 0.0f, max_abs = 0.0f;
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            float r = 0.5f * (lut_cw[i] + lut_ccw[i]);
+            if (r >  clamp) r =  clamp;
+            if (r < -clamp) r = -clamp;
+            residual[i] = r;
+            float a = fabsf(r);
+            sum_abs += a;
+            if (a > max_abs) max_abs = a;
+        }
+        smooth_lut_circular(residual, 3);
+
+        for (int i = 0; i < SAMPLE_COUNT; i++) accum[i] += residual[i];
+
+        printk("     Pass mean |Iq| = %.4f A  (peak %.4f A)\n",
+               (double)(sum_abs / (float)SAMPLE_COUNT), (double)max_abs);
+        if (pass < CALIB_AVERAGES) k_msleep(400);
+    }
+
+    float mean = 0.0f;
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        final_lut[i] = accum[i] / (float)CALIB_AVERAGES;
+        mean += final_lut[i];
+    }
+    mean /= (float)SAMPLE_COUNT;
+    for (int i = 0; i < SAMPLE_COUNT; i++) final_lut[i] -= mean;
+    smooth_lut_circular(final_lut, 3);
+
+    motor->current_sp = 0.0f;
+    bldc_motor_move(motor, 0.0f);
+    bldc_motor_loop_foc(motor);
+
+    motor->pid_velocity.p = saved_kp;
+    motor->pid_velocity.i = saved_ki;
+    motor->pid_velocity.limit = saved_v_limit;
+    motor->pid_velocity.Ts = saved_pid_ts;
+    motor->current_limit = saved_c_limit;
+    motor->lpf_velocity.Ts = saved_vel_ts;
+    motor->lpf_velocity.tf = saved_vel_tf;
+    motor->pid_velocity.output_ramp = saved_out_ramp;
+    motor->controller = saved_controller;
+
+    /* Clear all PID state so no integrator wind-up from calibration carries into haptic mode. */
+    pid_controller_reset(&motor->pid_velocity);
+    pid_controller_reset(&motor->pid_current_q);
+    pid_controller_reset(&motor->pid_current_d);
+    motor->current_sp = 0.0f;
+
+    printk("---> SLOW-SPIN CALIBRATION DONE (DC bias removed: %.5f A)\n", (double)mean);
+    printk("=== START LUT DUMP ===\n");
+    printk("Index,Current_A\n");
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        printk("%d,%f\n", i, (double)final_lut[i]);
+    }
+    printk("=== END LUT DUMP ===\n");
+    k_msleep(1000);
+}
+#endif /* !ANTICOGGING_POSITION_HOLD */
+
 void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem) 
 {
 #if ANTICOGGING_STATIC_CALIB
@@ -1022,10 +1304,16 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
         printk("!!! ANTICOG CALIB BLOCKED: motor not ready !!!\n");
         return;
     }
+#if ANTICOGGING_POSITION_HOLD
 #if ANTICOGGING_USE_ILC
-    anticogging_calibrate_ilc(motor, foc_sem);             /* fills final_lut + dumps */
+    if (anticogging_calibrate_ilc(motor, foc_sem) != 0) {
+        return;
+    }
 #else
-    anticogging_calibrate_static_detent(motor, foc_sem);   /* fills final_lut + dumps */
+    anticogging_calibrate_static_detent(motor, foc_sem);
+#endif
+#else
+    anticogging_calibrate_spin(motor, foc_sem);
 #endif
 
     if (anticog_flash_save(final_lut) == 0) {
@@ -1033,7 +1321,6 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     } else {
         printk("!!! ANTICOG: FAILED to store calibration to flash !!!\n");
     }
-    return;
 #else
     /* Calibration disabled -> the map MUST be loaded from flash. */
     if (anticog_flash_load(final_lut) != 0) {
@@ -1064,159 +1351,5 @@ void anticogging_calibrate(bldc_motor_t *motor, struct k_sem *foc_sem)
     }
     printk("=== END LUT DUMP ===\n");
     k_msleep(1000);
-    return;
 #endif
-
-    /* -------- legacy velocity-ILC calibration (superseded by flash, disabled) --- */
-#if 0
-    // Check if the LUT has been preloaded with data, if so, skip calibration and use the preloaded data
-    bool table_has_data = false;
-
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        if (anticogging_lut[i] != 0.0f) {
-            table_has_data = true;
-            break; 
-        }
-    }
-
-    if(table_has_data)
-    {
-        printk("LUT has been preloaded with data, skipping calibration.\n");
-        printk("=== START LUT DUMP ===\n");
-        printk("Index,Current_A\n");
-
-        for (int i = 0; i < SAMPLE_COUNT; i++) {
-            final_lut[i] = anticogging_lut[i];
-            printk("%d,%f\n", i, (double)final_lut[i]);
-        }
-
-        printk("=== END LUT DUMP ===\n");
-        k_msleep(1000);
-        return;
-    }
-
-    /* 1. BEZPEČNOSTNÍ POJISTKA: Kontrola FOC Inicializace */
-    if (motor->motor_status != MOTOR_READY) {
-        printk("===================================================\n");
-        printk("!!! ANTICOGGING CALIBRATION BLOCKED !!!\n");
-        printk("FOC initialization (PP check) failed at startup.\n");
-        printk("Motor is likely physically blocked or disconnected.\n");
-        printk("Please free the motor shaft and restart the board.\n");
-        printk("===================================================\n");
-        return; 
-    }
-
-    static float lut_cw[SAMPLE_COUNT];
-    static float lut_ccw[SAMPLE_COUNT];
-    static float residual[SAMPLE_COUNT];
-    static float accum[SAMPLE_COUNT];
-
-    float saved_kp = motor->pid_velocity.p;
-    float saved_ki = motor->pid_velocity.i;
-    float saved_v_limit = motor->pid_velocity.limit;
-    float saved_c_limit = motor->current_limit;
-    float saved_vel_ts = motor->lpf_velocity.Ts;
-    float saved_out_ramp = motor->pid_velocity.output_ramp;
-    motion_control_type_t saved_controller = motor->controller;
-
-    // set VELOCITY control mode for calibration
-    motor->controller = VELOCITY;
-
-    /* OPRAVA: Návrat k "měkké gumě" bez Integrator Windup efektu */
-    motor->pid_velocity.p = 0.05f;       /* Hladké obkreslení zubů (žádné kmitání) */
-    motor->pid_velocity.i = 0.02f;       /* Miniaturní I-složka jen proti zastavení na tření */
-    motor->pid_velocity.limit = 1.0f;    
-    motor->current_limit = 1.0f;     
-
-    /* Slew-limit the velocity-PID output (= the current set-point). Without this,
-     * when the rotor briefly sticks on a cogging tooth the integrator dumps almost
-     * the full current in ~1 ms, the rotor snaps forward, overshoots and the loop
-     * rings - exactly the "oscillates in place then unsticks" behaviour. Limiting
-     * the current slew to ~20 A/s removes the violent snap while staying far faster
-     * than needed to track the cogging ripple (~3 A/s at this speed). Restored
-     * after calibration. */
-    motor->pid_velocity.output_ramp = 20.0f;
-
-    /* CRITICAL: move() below runs at 1000 Hz (every 5 FOC ticks), but the runtime
-     * config hard-codes lpf_velocity.Ts = 0.01 (100 Hz). That 10x mismatch leaves
-     * the velocity estimate under-filtered and noisy - a primary cause of the
-     * random oscillations. Match Ts to the real update rate so the tf=0.015 s
-     * smoothing behaves as intended. Restored after calibration. */
-    motor->lpf_velocity.Ts = 0.001f;
-
-    /* Zero the shipped map AND the averaging accumulator. final_lut stays 0 for
-     * the WHOLE calibration, so every pass measures the same raw (uncompensated)
-     * cogging - the passes are independent estimates of one fixed quantity. */
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        final_lut[i] = 0.0f;
-        accum[i] = 0.0f;
-    }
-
-    printk("---> ANTICOGGING CALIBRATION START (%d averages)\n", CALIB_AVERAGES);
-
-    for (int pass = 1; pass <= CALIB_AVERAGES; pass++) {
-        printk("---> PASS %d / %d ---\n", pass, CALIB_AVERAGES);
-
-        run_directional_calibration(motor, foc_sem, CALIB_SPEED_RAD_S, lut_cw);
-        k_msleep(500); 
-        run_directional_calibration(motor, foc_sem, -CALIB_SPEED_RAD_S, lut_ccw);
-
-        float max_residual_error = 0.0f;
-        float sum_residual_error = 0.0f;
-
-        /* Combine both directions (cancels direction-dependent friction, keeps
-         * position-dependent cogging), clamp obvious spikes, then spatially
-         * smooth this pass BEFORE adding it to the ensemble average. */
-        for (int i = 0; i < SAMPLE_COUNT; i++) {
-            float r = 0.5f * (lut_cw[i] + lut_ccw[i]);
-            if (r >  0.5f) r =  0.5f;
-            if (r < -0.5f) r = -0.5f;
-            residual[i] = r;
-        }
-        smooth_lut_circular(residual, 5);
-
-        for (int i = 0; i < SAMPLE_COUNT; i++) {
-            accum[i] += residual[i];
-
-            float abs_err = fabs(residual[i]);
-            sum_residual_error += abs_err;
-            if (abs_err > max_residual_error) max_residual_error = abs_err;
-        }
-
-        float mean_error = sum_residual_error / (float)SAMPLE_COUNT;
-        printk("     Pass mean cogging = %.4f A (Max spike = %.4f A)\n", (double)mean_error, (double)max_residual_error);
-
-        if (pass < CALIB_AVERAGES) k_msleep(500); 
-    }
-
-    /* Ensemble average of the independent passes. Because final_lut was never fed
-     * back, each pass is an unbiased estimate of the true cogging; the mean keeps
-     * that accuracy but with ~sqrt(N) less random noise -> more repeatable map. */
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        final_lut[i] = accum[i] * RELAXATION_GAIN / (float)CALIB_AVERAGES;
-    }
-
-    /* =========================================================================
-     * 3. FILTRACE: závěrečné lehké vyhlazení plně sestavené finální mapy
-     * ========================================================================= */
-    smooth_lut_circular(final_lut, 3);
-
-    /* Návrat uživatelských PID hodnot po úspěšné kalibraci */
-    motor->pid_velocity.p = saved_kp;
-    motor->pid_velocity.i = saved_ki;
-    motor->pid_velocity.limit = saved_v_limit;
-    motor->current_limit = saved_c_limit;
-    motor->lpf_velocity.Ts = saved_vel_ts;
-    motor->pid_velocity.output_ramp = saved_out_ramp;
-    motor->controller = saved_controller;
-
-    printk("---> CALIBRATION COMPLETED ---\n");
-    printk("=== START LUT DUMP ===\n");
-    printk("Index,Current_A\n");
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        printk("%d,%f\n", i, (double)final_lut[i]);
-    }
-    printk("=== END LUT DUMP ===\n");
-    k_msleep(1000);
-#endif /* legacy velocity-ILC (disabled) */
 }

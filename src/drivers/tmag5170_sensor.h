@@ -53,8 +53,15 @@ void sensor_update(sensor_t *sensor);
 /** Return the most recently cached mechanical angle [rad]. */
 float sensor_get_angle(sensor_t *sensor);
 
-/** Return instantaneous velocity [rad/s] (stub, returns 0). */
+/** Return observer velocity [rad/s]. */
 float sensor_get_velocity(sensor_t *sensor);
+
+/** Return d(tracked angle)/dt [rad/s] (lead vs observer omega). */
+float sensor_get_track_rate(sensor_t *sensor);
+
+/** Set/get the type-II observer natural frequency [Hz]. Default is 20 Hz. */
+void sensor_set_observer_bw(float fn_hz);
+float sensor_get_observer_bw(void);
 
 /** Return latest cached X magnetic field component [mT]. */
 float sensor_get_bx_mt(sensor_t *sensor);

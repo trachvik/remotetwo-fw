@@ -769,8 +769,15 @@ void bldc_motor_loop_foc(bldc_motor_t *motor) // TO DO - anticogging conpensatio
                 LOG_WRN("### CURRENT CONTROL UNAVAILABLE - SAADC not ready - running VOLTAGE fallback (NOT current control!) ###");
             }
         }
+    } else if (current_sense_is_ready()) {
+        /* VOLTAGE mode: still measure Iq/Id (LUT logging, telemetry). Do not
+         * close the current PI — a current source on a cogging spring is an
+         * undamped ~28 Hz oscillator. Back-EMF through R damps instead. */
+        float id_meas = 0.0f, iq_meas = 0.0f;
+        current_sense_get_foc_currents(motor->electrical_angle, &id_meas, &iq_meas);
+        motor->current.q = lowpass_filter_operator(&motor->lpf_current_q, iq_meas);
+        motor->current.d = lowpass_filter_operator(&motor->lpf_current_d, id_meas);
     }
-    /* else VOLTAGE mode: voltage.q / voltage.d were already set by move(). */
 
     /* Apply the phase voltages using the fresh electrical angle. */
     bldc_motor_set_phase_voltage(motor, motor->voltage.q, motor->voltage.d, motor->electrical_angle);
@@ -878,6 +885,36 @@ void bldc_motor_configure_current_loop(bldc_motor_t *motor,
             (double)lpf_cutoff_hz,
             (double)(lpf_tf * 1e6f),
             (double)(Ts    * 1e6f));
+}
+
+void bldc_motor_reset_current_loop_state(bldc_motor_t *motor)
+{
+    if (motor == NULL) return;
+
+    pid_controller_reset(&motor->pid_current_q);
+    pid_controller_reset(&motor->pid_current_d);
+    motor->lpf_current_q.y_prev = 0.0f;
+    motor->lpf_current_d.y_prev = 0.0f;
+    motor->current.q = 0.0f;
+    motor->current.d = 0.0f;
+    motor->voltage.q = 0.0f;
+    motor->voltage.d = 0.0f;
+    motor->current_sp = 0.0f;
+}
+
+void bldc_motor_set_bridge_hiz(bldc_motor_t *motor, bool hiz)
+{
+    if (motor == NULL || motor->driver == NULL) return;
+
+    bldc_driver_3pwm_t *drv = (bldc_driver_3pwm_t *)motor->driver;
+
+    /* Zero high-side PWM before the INL edge so a rising enable cannot
+     * apply the last SVPWM vector into an open bridge. */
+    driver_set_pwm(motor->driver, 0.0f, 0.0f, 0.0f);
+    motor->voltage.q = 0.0f;
+    motor->voltage.d = 0.0f;
+    motor->current_sp = 0.0f;
+    bldc_driver_3pwm_set_lowside_enable(drv, !hiz);
 }
 
 /**
