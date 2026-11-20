@@ -50,7 +50,6 @@ To make this work in smooth mode, I must implement a virtual detent that activat
 
 ## Cogging and noise reduction
 
-- [ ] calibration phase (iterative calibration):
-    1. iteration 0: raw anticogging samples
+- [ ] calibration phase (iterative calibration)
 - [ ] make sure tmag oversampling is optimal - currently 1x
 - [x] make sure tmag spi freq. is 10 MHz
